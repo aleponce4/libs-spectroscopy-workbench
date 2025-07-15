@@ -215,16 +215,17 @@ def update_labels(app, ax, intensity_var, round_off_error_tolerance_var, font_si
             
             # Check if element_df is not None before accessing it
             if element_df is not None:
-                rounded_peak_x = round(x_data[idx], app.round_off_error_tolerance)
-                element_df.loc[:, "Wavelength"] = pd.to_numeric(element_df["Wavelength"], errors="coerce")
-                rounded_wavelengths = [round(x, app.round_off_error_tolerance) for x in element_df["Wavelength"].dropna()]
-
-                # Check if the rounded peak wavelength is in the rounded_wavelengths list
-                if rounded_peak_x in rounded_wavelengths:
-                    match_idx = rounded_wavelengths.index(rounded_peak_x)
-                    element_symbol = element_df.iloc[match_idx]["Symbol"]
-                    ionization_level = element_df.iloc[match_idx]["Ionization Level"]
+                tol = 10 ** (-app.round_off_error_tolerance)          # e.g. slider 0 → 1 nm, 1 → 0.1 nm
+                element_df["Wavelength"] = pd.to_numeric(element_df["Wavelength"], errors="coerce")
+                wavelengths = element_df["Wavelength"].dropna()
+                
+                diff = np.abs(wavelengths - x_data[idx])
+                if (diff <= tol).any():                                # at least one library line within tolerance
+                    match_idx = diff.idxmin()                          # pick the closest one
+                    element_symbol = element_df.at[match_idx, "Symbol"]
+                    ionization_level = element_df.at[match_idx, "Ionization Level"]
                     label += f" ({element_symbol}, {ionization_level})"
+
 
             # Add the following two lines to create the text object and append it to the texts list
             text_obj = ax.text(x_data[idx], y_data[idx], label, fontsize=font_size_var.get(), ha='center', va='bottom')
