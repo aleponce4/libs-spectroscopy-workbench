@@ -37,7 +37,7 @@ def label_peaks(app, ax, element_df):
         # Function to update slider label
         def update_font_size_slider_label(app, ax, font_size_var):
             font_size_slider_label.config(text=f"{font_size_var.get()}")
-            update_labels(app, ax, intensity_var, round_off_error_tolerance_var, font_size_var, prominence_var)
+            update_labels(app, ax, intensity_var, tolerance_var, font_size_var, prominence_var, hide_unlabeled_peaks_var)
 
         font_size_var.trace("w", lambda *args: update_font_size_slider_label(app, ax, font_size_var))
 
@@ -54,11 +54,11 @@ def label_peaks(app, ax, element_df):
         intensity_slider.grid(row=1, column=1, padx=5, pady=5, sticky="w")
 
         # Function to update slider 
-        def update_slider_label(app, ax, intensity_var, round_off_error_tolerance_var):
-            slider_label.config(text=f"{intensity_var.get()}%")
-            update_labels(app, ax, intensity_var, round_off_error_tolerance_var, font_size_var, prominence_var)
+        def update_slider_label(*args):
+          slider_label.config(text=f"{intensity_var.get()}%")
+          update_labels(app, ax, intensity_var, tolerance_var, font_size_var, prominence_var, hide_unlabeled_peaks_var)
 
-        intensity_var.trace("w", lambda *args: update_slider_label(app, ax, intensity_var, round_off_error_tolerance_var))
+        intensity_var.trace("w", update_slider_label)
 
         # Create the intensity threshold slider label
         slider_label = ttk.Label(tolerance_window, text=f"{intensity_var.get()}%")
@@ -74,7 +74,7 @@ def label_peaks(app, ax, element_df):
         # Function to update prominence slider label
         def update_prominence_slider_label(app, ax, prominence_var):
             prominence_slider_label.config(text=f"{prominence_var.get()}%")
-            update_labels(app, ax, intensity_var, round_off_error_tolerance_var, font_size_var, prominence_var)
+            update_labels(app, ax, intensity_var, tolerance_var, font_size_var, prominence_var, hide_unlabeled_peaks_var)
 
         prominence_var.trace("w", lambda *args: update_prominence_slider_label(app, ax, prominence_var))
 
@@ -82,29 +82,38 @@ def label_peaks(app, ax, element_df):
         prominence_slider_label = ttk.Label(tolerance_window, text=f"{prominence_var.get()}%")
         prominence_slider_label.grid(row=2, column=2, padx=15, pady=15, sticky="w")
 
-        # Create the round-off error tolerance slider  ##########################################
-        ttk.Label(tolerance_window, text="Select round-off error tolerance:").grid(row=3, column=0, padx=5, pady=5, sticky="e")
-        round_off_error_tolerance_var = tk.IntVar()
-        round_off_error_tolerance_var.set(0)
-        round_off_error_tolerance_slider = ttk.Scale(tolerance_window, from_=0, to=3, orient=tk.HORIZONTAL, variable=round_off_error_tolerance_var, length=300)
-        round_off_error_tolerance_slider.grid(row=3, column=1, padx=5, pady=5, sticky="w")
-        app.round_off_error_tolerance_var = round_off_error_tolerance_var
+        # Create the Tolerance (nm) slider ##########################################
+        ttk.Label(tolerance_window, text="Tolerance (nm):").grid(row=3, column=0, padx=5, pady=5, sticky="e")
+        # Use DoubleVar for floating point values
+        tolerance_var = tk.DoubleVar() 
+        tolerance_var.set(0.3) # Set a sensible default
+        
+        tolerance_slider = ttk.Scale(
+            tolerance_window, 
+            from_=0.05, 
+            to=1.5, 
+            orient=tk.HORIZONTAL, 
+            variable=tolerance_var, 
+            length=300
+        )
+        # You need to manually set the resolution on the variable's trace, not the widget
+        tolerance_slider.grid(row=3, column=1, padx=5, pady=5, sticky="w")
+        
+        # Create the label that will display the slider's value
+        tolerance_slider_label = ttk.Label(tolerance_window, text=f"{tolerance_var.get():.2f}")
+        tolerance_slider_label.grid(row=3, column=2, padx=15, pady=15, sticky="w")
+        
+        # Function to update the label and the plot
+        def update_tolerance_label(*args):
+            # Round the value for display
+            current_val = tolerance_var.get()
+            rounded_val = round(current_val / 0.05) * 0.05 # Snap to 0.05 increments
+            tolerance_slider_label.config(text=f"{rounded_val:.2f}")
+            # Note: The variable passed to update_labels is now tolerance_var
+            update_labels(app, ax, intensity_var, tolerance_var, font_size_var, prominence_var, hide_unlabeled_peaks_var)
 
-        # Function to update slider label with decimal values
-        def update_round_off_error_tolerance_slider_label(app, ax, intensity_var, round_off_error_tolerance_slider_label, round_off_error_tolerance_var):
-            # Calculate decimal value based on current slider value
-            decimal_value = round(10 ** (-round_off_error_tolerance_var.get()), 3)
-            # Update slider label with decimal value
-            round_off_error_tolerance_slider_label.config(text=f"{decimal_value}")
-            # Update plot labels
-            update_labels(app, ax, intensity_var, round_off_error_tolerance_var, font_size_var, prominence_var)
-
-        # Update the slider label when the slider is moved
-        round_off_error_tolerance_var.trace("w", lambda *args: update_round_off_error_tolerance_slider_label(app, ax, intensity_var, round_off_error_tolerance_slider_label, round_off_error_tolerance_var))
-
-        # Create the round-off error tolerance slider label
-        round_off_error_tolerance_slider_label = ttk.Label(tolerance_window, text=f"{round_off_error_tolerance_var.get()}")
-        round_off_error_tolerance_slider_label.grid(row=3, column=2, padx=15, pady=15, sticky="w")
+        # Link the slider's movement to the update function
+        tolerance_var.trace("w", update_tolerance_label)
 
 
         ################ Buttons ################
@@ -138,17 +147,16 @@ def label_peaks(app, ax, element_df):
         close_button = ttk.Button(buttons_frame, text="Close", command=tolerance_window.destroy)
         close_button.grid(row=0, column=4, sticky='ew', padx=5, pady=5)
 
-        update_labels(app, ax, intensity_var, round_off_error_tolerance_var, font_size_var, prominence_var)
+        update_labels(app, ax, intensity_var, tolerance_var, font_size_var, prominence_var, hide_unlabeled_peaks_var)
 
     # call the tolerance_window function
     tolerance_window(app, ax, element_df)
 
 # ================================================================================================
 # Update labels function
-def update_labels(app, ax, intensity_var, round_off_error_tolerance_var, font_size_var, prominence_var):  # Add round_off_error_tolerance_var to the function arguments
+def update_labels(app, ax, intensity_var, tolerance_var, font_size_var, prominence_var, hide_unlabeled_peaks_var):  # Add round_off_error_tolerance_var to the function arguments
     # Update the intensity threshold
     app.current_threshold_percent = intensity_var.get()
-    app.round_off_error_tolerance = round_off_error_tolerance_var.get()  # Update round-off error tolerance from the argument
     save_peak_values(app)
 
     # Remove existing lines from the axes matplotlib
@@ -211,11 +219,11 @@ def update_labels(app, ax, intensity_var, round_off_error_tolerance_var, font_si
      # Label the peaks with element symbols and ionization levels if possible
     texts = []  # store text objects for adjust_text
     for idx in final_peak_indices:
-            label = f"{x_data[idx]:.0f} nm"
+            label = f"{x_data[idx]:.2f} nm" 
             
             # Check if element_df is not None before accessing it
             if element_df is not None:
-                tol = 10 ** (-app.round_off_error_tolerance)          # e.g. slider 0 → 1 nm, 1 → 0.1 nm
+                tol = tolerance_var.get() #        # e.g. slider 0 → 1 nm, 1 → 0.1 nm
                 element_df["Wavelength"] = pd.to_numeric(element_df["Wavelength"], errors="coerce")
                 wavelengths = element_df["Wavelength"].dropna()
                 
@@ -229,7 +237,10 @@ def update_labels(app, ax, intensity_var, round_off_error_tolerance_var, font_si
 
             # Add the following two lines to create the text object and append it to the texts list
             text_obj = ax.text(x_data[idx], y_data[idx], label, fontsize=font_size_var.get(), ha='center', va='bottom')
+            if hide_unlabeled_peaks_var.get() and label.endswith("nm"):
+                text_obj.set_visible(False)
             texts.append(text_obj)
+
 
     # Update app.peak_labels with the adjusted text objects
     app.peak_labels = texts
