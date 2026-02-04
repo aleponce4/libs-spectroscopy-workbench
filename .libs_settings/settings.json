@@ -1,0 +1,22 @@
+{
+  "adjust_spectrum": {
+    "smoothing_method": "Savitzky-Golay filter",
+    "smoothing_strength": 23,
+    "laser_removal_enabled": false,
+    "laser_wavelength": 532.63,
+    "laser_removal_width": 2.0,
+    "baseline_removal_enabled": true,
+    "baseline_smoothness": "Medium (1e4)",
+    "baseline_asymmetry": "Balanced (0.001)"
+  },
+  "adjust_plot": {
+    "x_axis_start": 250.0,
+    "x_axis_end": 800.0,
+    "y_axis_start": -450.8,
+    "y_axis_end": 9466.3,
+    "line_color": "#1F77B4",
+    "background_color": "#FFFFFF",
+    "line_width": 1.0,
+    "normalize_enabled": true
+  }
+}

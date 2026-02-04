@@ -14,6 +14,129 @@ import markdown
 from tkhtmlview import HTMLLabel
 
 
+# Module-level function for baseline removal - can be imported and used elsewhere
+def apply_baseline_removal(y_data, lam=1e6, p=0.001, niter=10, clip=False):
+    """
+    Remove baseline using asymmetric least squares smoothing (ALS) - Eilers method.
+    
+    Parameters:
+    y_data: spectral data
+    lam: smoothness parameter (higher = smoother). Typical range: 1e4-1e7
+    p: asymmetry parameter (0 < p < 0.5). Lower = more aggressive. Typical: 0.0001-0.01
+    niter: number of iterations for weight refinement
+    clip: if True, clip negative values to 0; if False, preserve for analysis
+    """
+    from scipy.sparse import diags
+    from scipy.sparse.linalg import spsolve
+    
+    y = np.asarray(y_data, dtype=float)
+    m = y.size
+    if m < 3:
+        return y.copy()
+    
+    # Create the 2nd-difference matrix with correct offsets
+    # For shape (m-2, m), we want the operator to act on columns (i, i+1, i+2)
+    D = diags([np.ones(m-2), -2*np.ones(m-2), np.ones(m-2)], [0, 1, 2], shape=(m-2, m))
+    
+    # Initialize weights
+    w = np.ones(m)
+    
+    # Iteratively refine baseline and weights
+    for _ in range(niter):
+        W = diags(w, 0, shape=(m, m))
+        # Solve: (W + lambda * D^T * D) * z = W * y
+        z = spsolve(W + lam * (D.T @ D), w * y)
+        z = np.asarray(z).flatten()
+        
+        # Update weights: p for peaks (above baseline), (1-p) for valleys (below)
+        w = np.where(y > z, p, 1 - p)
+    
+    # Correct the data
+    y_corr = y - z
+    
+    return np.clip(y_corr, 0, None) if clip else y_corr
+
+
+# Module-level function for applying smoothing - can be imported and used elsewhere
+def apply_smoothing(y_data, method, strength):
+    """
+    Apply smoothing to spectral data.
+    
+    Parameters:
+    y_data: spectral data array
+    method: smoothing method name (string)
+    strength: smoothing strength parameter (int or float)
+    
+    Returns:
+    smoothed data array
+    """
+    val = strength
+    
+    # Apply Moving average smoothing
+    if method == "Moving average":
+        window_size = max(int(float(val)) // 2, 1)
+        if window_size % 2 == 0:
+            window_size += 1
+        alpha = 1 / window_size
+        y_smoothed = np.zeros_like(y_data)
+        y_smoothed[0] = y_data[0]
+        for i in range(1, len(y_data)):
+            y_smoothed[i] = alpha * y_data[i] + (1 - alpha) * y_smoothed[i - 1]
+
+    # Apply Gaussian filter smoothing
+    elif method == "Gaussian filter":
+        y_smoothed = gaussian_filter1d(y_data, sigma=val/2)
+
+    # Apply Savitzky-Golay filter smoothing
+    elif method == "Savitzky-Golay filter":
+        window = max(int(val) // 2, 5)
+        if window % 2 == 0:
+            window += 1
+        y_smoothed = savgol_filter(y_data, window_length=window, polyorder=3)
+        y_smoothed = np.clip(y_smoothed, 0, None)
+
+    # Apply Median filter smoothing
+    elif method == "Median filter":
+        kernel = max(int(val) // 2, 1)
+        if kernel % 2 == 0:
+            kernel += 1
+        y_smoothed = medfilt(y_data, kernel_size=kernel)
+
+    # Apply Wavelet transform smoothing
+    elif method == "Wavelet transform":
+        coeffs = pywt.wavedec(y_data, 'coif1')
+        threshold = (val/4) * np.max(np.abs(coeffs[-1]))
+        coeffs_thresh = [pywt.threshold(c, value=threshold, mode="soft") for c in coeffs[1:]]
+        coeffs_thresh.insert(0, coeffs[0])
+        y_smoothed = pywt.waverec(coeffs_thresh, 'coif1')
+        y_smoothed = np.resize(y_smoothed, len(y_data))
+    
+    else:
+        y_smoothed = y_data
+
+    return y_smoothed
+
+
+# Module-level function for laser removal
+def apply_laser_removal(y_data, x_data, center_wavelength, width):
+    """
+    Remove laser line from spectral data.
+    
+    Parameters:
+    y_data: spectral data array
+    x_data: wavelength array
+    center_wavelength: center wavelength of laser line
+    width: width of removal region around center
+    
+    Returns:
+    data with laser line removed
+    """
+    result = y_data.copy()
+    mask = (x_data >= center_wavelength - width) & (x_data <= center_wavelength + width)
+    result[mask] = 0
+    return result
+
+
 # Define a function to adjust the spectrum
 def adjust_spectrum(app, ax):
     if not app.line:
@@ -59,6 +182,31 @@ def adjust_spectrum(app, ax):
     def on_apply(app, ax):
         global original_y_data
         original_y_data = app.line.get_ydata().copy()
+        
+        # Save current settings to presets
+        from settings_manager import save_settings, load_settings
+        
+        # Load existing settings (to preserve plot settings if they exist)
+        existing_settings = load_settings()
+        if existing_settings is None:
+            existing_settings = {"adjust_spectrum": {}, "adjust_plot": {}}
+        
+        # Update spectrum settings
+        all_settings = existing_settings
+        all_settings["adjust_spectrum"] = {
+            "smoothing_method": smooth_method_var.get(),
+            "smoothing_strength": int(float(smooth_strength_slider.get())),
+            "laser_removal_enabled": laser_removal_var.get(),
+            "laser_wavelength": laser_wavelength_var.get(),
+            "laser_removal_width": laser_width_var.get(),
+            "baseline_removal_enabled": baseline_removal_var.get(),
+            "baseline_smoothness": smoothness_preset_var.get(),
+            "baseline_asymmetry": asymmetry_preset_var.get()
+        }
+        success, msg = save_settings(all_settings)
+        if not success:
+            print(f"Warning: Could not save settings - {msg}")
+        
         spectrum_window.destroy()
 
     # Create a frame for the smoothing method dropdown 
@@ -147,18 +295,6 @@ def adjust_spectrum(app, ax):
     laser_width_slider = ttk.Scale(laser_removal_frame, from_=0.5, to=10.0, orient="horizontal", length=400, variable=laser_width_var, command=update_laser_width)
     laser_width_slider.pack(padx=(10, 10), pady=(5, 10))
 
-    def apply_laser_removal(y_data, x_data, center_wavelength=532.63, width=2.0):
-        """Remove laser pointer artifact by zeroing out the specified wavelength range"""
-        y_processed = y_data.copy()
-        
-        # Find indices within the removal range
-        mask = (x_data >= center_wavelength - width) & (x_data <= center_wavelength + width)
-        
-        # Set those values to zero
-        y_processed[mask] = 0
-        
-        return y_processed
-
 #=======================================================================================================================
     # Create baseline removal frame
     baseline_removal_frame = ttk.LabelFrame(main_frame, text="Baseline Removal")
@@ -176,17 +312,17 @@ def adjust_spectrum(app, ax):
     ttk.Label(smoothness_frame, text="Smoothness (λ):").pack(side=tk.LEFT, padx=(0, 10))
     
     smoothness_preset_var = tk.StringVar()
-    smoothness_preset_var.set("Medium (1e6)")  # Default value
+    smoothness_preset_var.set("Medium (1e4)")  # Default value
     
-    smoothness_options = ["Low (1e4)", "Medium (1e6)", "High (1e7)"]
+    smoothness_options = ["Low (1e3)", "Medium (1e4)", "High (1e5)"]
     smoothness_preset_menu = ttk.Combobox(smoothness_frame, textvariable=smoothness_preset_var, values=smoothness_options, width=20, state="readonly")
     smoothness_preset_menu.pack(side=tk.LEFT)
     
     # Store the actual lambda values
     smoothness_values = {
-        "Low (1e4)": 1e4,
-        "Medium (1e6)": 1e6,
-        "High (1e7)": 1e7
+        "Low (1e3)": 1e3,
+        "Medium (1e4)": 1e4,
+        "High (1e5)": 1e5
     }
 
     # Asymmetry parameter frame
@@ -213,95 +349,6 @@ def adjust_spectrum(app, ax):
     smoothness_preset_menu.bind("<<ComboboxSelected>>", lambda event: update_spectrum_with_processing())
     asymmetry_preset_menu.bind("<<ComboboxSelected>>", lambda event: update_spectrum_with_processing())
 
-    def apply_baseline_removal(y_data, lam=1e6, p=0.001, niter=10, clip=False):
-        """
-        Remove baseline using asymmetric least squares smoothing (ALS) - Eilers method.
-        
-        Parameters:
-        y_data: spectral data
-        lam: smoothness parameter (higher = smoother). Typical range: 1e4-1e7
-        p: asymmetry parameter (0 < p < 0.5). Lower = more aggressive. Typical: 0.0001-0.01
-        niter: number of iterations for weight refinement
-        clip: if True, clip negative values to 0; if False, preserve for analysis
-        """
-        from scipy.sparse import diags
-        from scipy.sparse.linalg import spsolve
-        
-        y = np.asarray(y_data, dtype=float)
-        m = y.size
-        if m < 3:
-            return y.copy()
-        
-        # Create the 2nd-difference matrix with correct offsets
-        # For shape (m-2, m), we want the operator to act on columns (i, i+1, i+2)
-        D = diags([np.ones(m-2), -2*np.ones(m-2), np.ones(m-2)], [0, 1, 2], shape=(m-2, m))
-        
-        # Initialize weights
-        w = np.ones(m)
-        
-        # Iteratively refine baseline and weights
-        for _ in range(niter):
-            W = diags(w, 0, shape=(m, m))
-            # Solve: (W + lambda * D^T * D) * z = W * y
-            z = spsolve(W + lam * (D.T @ D), w * y)
-            z = np.asarray(z).flatten()
-            
-            # Update weights: p for peaks (above baseline), (1-p) for valleys (below)
-            w = np.where(y > z, p, 1 - p)
-        
-        # Correct the data
-        y_corr = y - z
-        
-        return np.clip(y_corr, 0, None) if clip else y_corr
-
-#=======================================================================================================================
-
-    def apply_smoothing(val, smooth_method_var):
-    # Apply Moving average smoothing
-        if smooth_method_var.get() == "Moving average":
-            window_size = max(int(float(val)) // 2, 1)  # Divide window size by 2
-            if window_size % 2 == 0:
-                window_size += 1
-            alpha = 1 / (window_size)
-            y_smoothed = np.zeros_like(y_data)
-            y_smoothed[0] = y_data[0]
-            for i in range(1, len(y_data)):
-                y_smoothed[i] = alpha * y_data[i] + (1 - alpha) * y_smoothed[i - 1]
-
-        # Apply Gaussian filter smoothing
-        elif smooth_method_var.get() == "Gaussian filter":
-            y_smoothed = scipy.ndimage.gaussian_filter(y_data, (val/2))  # Divide sigma by 2
-
-        # Apply Savitzky-Golay filter smoothing
-        elif smooth_method_var.get() == "Savitzky-Golay filter":
-            val = max(val // 2, 5)  # Divide window length by 2
-            if val % 2 == 0:
-                val += 1
-            y_smoothed = scipy.signal.savgol_filter(y_data, window_length=val, polyorder=3)
-            y_smoothed = np.clip(y_smoothed, 0, None)
-
-        # Apply Median filter smoothing
-        elif smooth_method_var.get() == "Median filter":
-            val = max(int(val) // 2, 1)  # Divide kernel size by 2
-            if val % 2 == 0:
-                val += 1
-            y_smoothed = scipy.signal.medfilt(y_data, kernel_size=val)
-
-    # Apply Wavelet transform smoothing
-        elif smooth_method_var.get() == "Wavelet transform":
-            coeffs = pywt.wavedec(y_data, 'coif1')
-            threshold = (val/4) * np.max(np.abs(coeffs[-1]))  # Divide threshold multiplier by 4
-            coeffs_thresh = [pywt.threshold(c, value=threshold, mode="soft") for c in coeffs[1:]]
-            coeffs_thresh.insert(0, coeffs[0])
-            y_smoothed = pywt.waverec(coeffs_thresh, 'coif1')
-            y_smoothed = np.resize(y_smoothed, len(y_data))  # Resize y_smoothed to have the same length as y_data
-        
-        # If no smoothing method is selected, return the original data
-        else:
-            y_smoothed = y_data
-
-        return y_smoothed
-
     def update_spectrum_with_processing():
         """Update spectrum with smoothing, laser removal, and baseline removal"""
         # Start with original data
@@ -309,7 +356,7 @@ def adjust_spectrum(app, ax):
         
         # Apply smoothing if needed
         if smooth_strength_slider.get() > 0:
-            current_data = apply_smoothing(int(float(smooth_strength_slider.get())), smooth_method_var)
+            current_data = apply_smoothing(current_data, smooth_method_var.get(), int(float(smooth_strength_slider.get())))
         
         # Apply laser removal if enabled
         if laser_removal_var.get():

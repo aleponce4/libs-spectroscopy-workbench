@@ -9,6 +9,7 @@ import numpy as np
 import traceback
 import markdown
 from tkhtmlview import HTMLLabel
+from settings_manager import save_settings, load_settings, capture_plot_settings
 
 
 
@@ -121,7 +122,19 @@ def adjust_plot(app, ax, normalize=False):
     button_frame.pack(pady=20)
 
     # Create an "Apply" button to apply the changes
-    apply_button = ttk.Button(button_frame, text="Apply", command=lambda: [update_plot(), adjust_window.destroy()])
+    def on_apply():
+        update_plot()
+        # Save plot settings to presets
+        plot_settings = capture_plot_settings(x_start, x_end, y_start, y_end,
+                                             line_color, bg_color, line_width, normalize_var)
+        settings = load_settings()
+        if settings is None:
+            settings = {"adjust_spectrum": {}, "adjust_plot": {}}
+        settings["adjust_plot"] = plot_settings
+        save_settings(settings)
+        adjust_window.destroy()
+    
+    apply_button = ttk.Button(button_frame, text="Apply", command=on_apply)
     apply_button.pack(side="left", padx=10)
 
     # Add the Help button

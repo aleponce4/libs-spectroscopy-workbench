@@ -28,3 +28,53 @@ Traceback (most recent call last):
     self.tk.mainloop(n)
 KeyboardInterrupt
 
+Traceback (most recent call last):
+  File "c:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\main.py", line 26, in <module>
+    my_app = App()
+             ^^^^^
+  File "c:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\libs_app.py", line 75, in __init__
+    from menu_functions import create_sidebar
+  File "c:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\menu_functions.py", line 16, in <module>
+    from calibration_curve import apply_calibration_curve
+  File "c:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\calibration_curve.py", line 5, in <module>
+    from sklearn.linear_model import LinearRegression
+  File "C:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\LIBS_venv\Lib\site-packages\sklearn\__init__.py", line 82, in <module>
+    from .base import clone
+  File "C:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\LIBS_venv\Lib\site-packages\sklearn\base.py", line 17, in <module>
+    from .utils import _IS_32BIT
+  File "C:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\LIBS_venv\Lib\site-packages\sklearn\utils\__init__.py", line 21, in <module>
+    from . import _joblib
+  File "C:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\LIBS_venv\Lib\site-packages\sklearn\utils\_joblib.py", line 7, in <module>
+    import joblib
+  File "C:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\LIBS_venv\Lib\site-packages\joblib\__init__.py", line 113, in <module>
+    from .memory import Memory, MemorizedResult, register_store_backend
+  File "C:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\LIBS_venv\Lib\site-packages\joblib\memory.py", line 32, in <module>
+    from ._store_backends import StoreBackendBase, FileSystemStoreBackend
+  File "C:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\LIBS_venv\Lib\site-packages\joblib\_store_backends.py", line 15, in <module>
+    from .backports import concurrency_safe_rename
+  File "C:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\LIBS_venv\Lib\site-packages\joblib\backports.py", line 22, in <module>
+    import distutils  # noqa
+    ^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1176, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1138, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 1078, in _find_spec
+  File "C:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\LIBS_venv\Lib\site-packages\_distutils_hack\__init__.py", line 97, in find_spec
+    return method()
+           ^^^^^^^^
+  File "C:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\LIBS_venv\Lib\site-packages\_distutils_hack\__init__.py", line 108, in spec_for_distutils
+    mod = importlib.import_module('setuptools._distutils')
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.11_3.11.2544.0_x64__qbz5n2kfra8p0\Lib\importlib\__init__.py", line 126, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\LIBS_venv\Lib\site-packages\setuptools\__init__.py", line 22, in <module>
+    from . import logging
+  File "<frozen importlib._bootstrap>", line 1176, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1147, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 690, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 936, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 1026, in get_code
+  File "<frozen importlib._bootstrap_external>", line 1148, in path_stats
+  File "<frozen importlib._bootstrap_external>", line 147, in _path_stat
+KeyboardInterrupt
+

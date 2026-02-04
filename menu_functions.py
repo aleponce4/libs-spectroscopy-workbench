@@ -52,10 +52,13 @@ def create_sidebar(app):
 
     style.configure("LeftAligned.TButton", anchor='w')
 
+    from presets_dialog import open_presets_dialog
+    
     icons = [
         ("Import Data", "Icons/Import_icon.png", functools.partial(import_data, app)),
         ("Adjust Spectrum", "Icons/spectrum_icon.png", functools.partial(adjust_spectrum, app, app.ax)),
         ("Adjust Plot", "Icons/plot_icon.png", functools.partial(adjust_plot, app, app.ax)),
+        ("Adjustment Presets", "Icons/presets_icon.png", functools.partial(open_presets_dialog, app)),
         ("Search Element", "Icons/search_icon.png", functools.partial(periodic_table_window, app, app.ax)),
         ("Export Plot", "Icons/export_icon.png", functools.partial(export_plot, app, app.ax)),
         ("Export Data", "Icons/savedata_icon.png", functools.partial(export_data, app)),
