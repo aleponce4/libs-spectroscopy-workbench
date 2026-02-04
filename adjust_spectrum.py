@@ -38,7 +38,7 @@ def adjust_spectrum(app, ax):
     # Create a notebook (tabbed window)
     spectrum_window = tkinter.Toplevel()
     spectrum_window.title("Adjust Spectrum")
-    spectrum_window.geometry("600x280")  # Set window size to 400x200 pixels
+    spectrum_window.geometry("600x800")  # Set window size to 600x800 pixels
 
     # Create the main frame 
     main_frame = ttk.Frame(spectrum_window)  
@@ -111,8 +111,19 @@ def adjust_spectrum(app, ax):
 
 #=======================================================================================================================
     # Create laser removal frame
-    laser_removal_frame = ttk.LabelFrame(main_frame, text="Laser Removal (532.63 nm)")
+    laser_removal_frame = ttk.LabelFrame(main_frame, text="Laser Pointer Removal")
     laser_removal_frame.pack(fill=tk.X, expand=True, pady=10)
+
+    # Wavelength selection frame
+    wavelength_frame = ttk.Frame(laser_removal_frame)
+    wavelength_frame.pack(anchor=tk.W, padx=(10, 0), pady=(10, 5))
+    
+    ttk.Label(wavelength_frame, text="Laser wavelength (nm):").pack(side=tk.LEFT, padx=(0, 10))
+    laser_wavelength_var = tk.DoubleVar()
+    laser_wavelength_var.set(532.63)  # Default wavelength
+    
+    laser_wavelength_spinbox = ttk.Spinbox(wavelength_frame, from_=200, to=1200, textvariable=laser_wavelength_var, width=10, command=lambda: update_spectrum_with_processing())
+    laser_wavelength_spinbox.pack(side=tk.LEFT)
 
     # Checkbox to enable/disable laser removal
     laser_removal_var = tk.BooleanVar()
@@ -122,7 +133,7 @@ def adjust_spectrum(app, ax):
     # Slider for laser removal width
     ttk.Label(laser_removal_frame, text="Removal width (±nm):").pack(anchor=tk.W, padx=(10, 0))
     laser_width_var = tk.DoubleVar()
-    laser_width_var.set(2.0)  # Default ±2 nm around 532.63
+    laser_width_var.set(2.0)  # Default ±2 nm around laser wavelength
     
     # Label to show current width value
     laser_width_label = ttk.Label(laser_removal_frame, text=f"±{laser_width_var.get():.1f} nm")
@@ -147,6 +158,103 @@ def adjust_spectrum(app, ax):
         y_processed[mask] = 0
         
         return y_processed
+
+#=======================================================================================================================
+    # Create baseline removal frame
+    baseline_removal_frame = ttk.LabelFrame(main_frame, text="Baseline Removal")
+    baseline_removal_frame.pack(fill=tk.X, expand=True, pady=10)
+
+    # Checkbox to enable/disable baseline removal
+    baseline_removal_var = tk.BooleanVar()
+    baseline_removal_checkbox = ttk.Checkbutton(baseline_removal_frame, text="Remove baseline", variable=baseline_removal_var, command=lambda: update_spectrum_with_processing())
+    baseline_removal_checkbox.pack(anchor=tk.W, padx=(10, 0), pady=(10, 5))
+
+    # Smoothness parameter frame
+    smoothness_frame = ttk.Frame(baseline_removal_frame)
+    smoothness_frame.pack(anchor=tk.W, padx=(10, 0), pady=(5, 10), fill=tk.X)
+    
+    ttk.Label(smoothness_frame, text="Smoothness (λ):").pack(side=tk.LEFT, padx=(0, 10))
+    
+    smoothness_preset_var = tk.StringVar()
+    smoothness_preset_var.set("Medium (1e6)")  # Default value
+    
+    smoothness_options = ["Low (1e4)", "Medium (1e6)", "High (1e7)"]
+    smoothness_preset_menu = ttk.Combobox(smoothness_frame, textvariable=smoothness_preset_var, values=smoothness_options, width=20, state="readonly")
+    smoothness_preset_menu.pack(side=tk.LEFT)
+    
+    # Store the actual lambda values
+    smoothness_values = {
+        "Low (1e4)": 1e4,
+        "Medium (1e6)": 1e6,
+        "High (1e7)": 1e7
+    }
+
+    # Asymmetry parameter frame
+    asymmetry_frame = ttk.Frame(baseline_removal_frame)
+    asymmetry_frame.pack(anchor=tk.W, padx=(10, 0), pady=(5, 10), fill=tk.X)
+    
+    ttk.Label(asymmetry_frame, text="Asymmetry (p):").pack(side=tk.LEFT, padx=(0, 10))
+    
+    asymmetry_preset_var = tk.StringVar()
+    asymmetry_preset_var.set("Balanced (0.001)")  # Default value
+    
+    asymmetry_options = ["Conservative (0.01)", "Balanced (0.001)", "Aggressive (0.0001)"]
+    asymmetry_preset_menu = ttk.Combobox(asymmetry_frame, textvariable=asymmetry_preset_var, values=asymmetry_options, width=20, state="readonly")
+    asymmetry_preset_menu.pack(side=tk.LEFT)
+    
+    # Store the actual p values
+    asymmetry_values = {
+        "Conservative (0.01)": 0.01,
+        "Balanced (0.001)": 0.001,
+        "Aggressive (0.0001)": 0.0001
+    }
+    
+    # Bind the combobox events to update the spectrum
+    smoothness_preset_menu.bind("<<ComboboxSelected>>", lambda event: update_spectrum_with_processing())
+    asymmetry_preset_menu.bind("<<ComboboxSelected>>", lambda event: update_spectrum_with_processing())
+
+    def apply_baseline_removal(y_data, lam=1e6, p=0.001, niter=10, clip=False):
+        """
+        Remove baseline using asymmetric least squares smoothing (ALS) - Eilers method.
+        
+        Parameters:
+        y_data: spectral data
+        lam: smoothness parameter (higher = smoother). Typical range: 1e4-1e7
+        p: asymmetry parameter (0 < p < 0.5). Lower = more aggressive. Typical: 0.0001-0.01
+        niter: number of iterations for weight refinement
+        clip: if True, clip negative values to 0; if False, preserve for analysis
+        """
+        from scipy.sparse import diags
+        from scipy.sparse.linalg import spsolve
+        
+        y = np.asarray(y_data, dtype=float)
+        m = y.size
+        if m < 3:
+            return y.copy()
+        
+        # Create the 2nd-difference matrix with correct offsets
+        # For shape (m-2, m), we want the operator to act on columns (i, i+1, i+2)
+        D = diags([np.ones(m-2), -2*np.ones(m-2), np.ones(m-2)], [0, 1, 2], shape=(m-2, m))
+        
+        # Initialize weights
+        w = np.ones(m)
+        
+        # Iteratively refine baseline and weights
+        for _ in range(niter):
+            W = diags(w, 0, shape=(m, m))
+            # Solve: (W + lambda * D^T * D) * z = W * y
+            z = spsolve(W + lam * (D.T @ D), w * y)
+            z = np.asarray(z).flatten()
+            
+            # Update weights: p for peaks (above baseline), (1-p) for valleys (below)
+            w = np.where(y > z, p, 1 - p)
+        
+        # Correct the data
+        y_corr = y - z
+        
+        return np.clip(y_corr, 0, None) if clip else y_corr
+
+#=======================================================================================================================
 
     def apply_smoothing(val, smooth_method_var):
     # Apply Moving average smoothing
@@ -195,7 +303,7 @@ def adjust_spectrum(app, ax):
         return y_smoothed
 
     def update_spectrum_with_processing():
-        """Update spectrum with both smoothing and laser removal"""
+        """Update spectrum with smoothing, laser removal, and baseline removal"""
         # Start with original data
         current_data = original_y_data.copy()
         
@@ -205,7 +313,13 @@ def adjust_spectrum(app, ax):
         
         # Apply laser removal if enabled
         if laser_removal_var.get():
-            current_data = apply_laser_removal(current_data, x_data, width=laser_width_var.get())
+            current_data = apply_laser_removal(current_data, x_data, center_wavelength=laser_wavelength_var.get(), width=laser_width_var.get())
+        
+        # Apply baseline removal if enabled
+        if baseline_removal_var.get():
+            lam = smoothness_values[smoothness_preset_var.get()]
+            p = asymmetry_values[asymmetry_preset_var.get()]
+            current_data = apply_baseline_removal(current_data, lam=lam, p=p)
         
         # Update the plot
         app.y_data = current_data
