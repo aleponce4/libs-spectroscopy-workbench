@@ -69,6 +69,7 @@ command = [
     f"--add-data={os.path.abspath('Icons/main_icon.ico')};Icons",
     f"--add-data={os.path.abspath('Icons/main_icon.png')};Icons",
     f"--add-data={os.path.abspath('Icons/plot_icon.png')};Icons",
+    f"--add-data={os.path.abspath('Icons/presets_icon.png')};Icons",
     f"--add-data={os.path.abspath('Icons/savedata_icon.png')};Icons",
     f"--add-data={os.path.abspath('Icons/search_icon.png')};Icons",
     f"--add-data={os.path.abspath('Icons/spectrum_icon.png')};Icons",
