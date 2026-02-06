@@ -121,31 +121,33 @@ def label_peaks(app, ax, element_df):
         buttons_frame.grid(row=5, column=0, columnspan=7, padx=5, pady=5)
 
         # Set the same weight for each column in the buttons_frame
-        buttons_frame.grid_columnconfigure(0, weight=1)
-        buttons_frame.grid_columnconfigure(1, weight=1)
-        buttons_frame.grid_columnconfigure(2, weight=1)
-        buttons_frame.grid_columnconfigure(3, weight=1)
+        for col in range(6):
+            buttons_frame.grid_columnconfigure(col, weight=1)
 
         # Create the Hide unlabeled peaks toggle button
         hide_unlabeled_peaks_var = tk.BooleanVar()
         hide_unlabeled_peaks_button = ttk.Checkbutton(buttons_frame, text="Hide unlabeled peaks", variable=hide_unlabeled_peaks_var, command=lambda: toggle_unlabeled_peaks(app, ax, hide_unlabeled_peaks_var), style="Toggle.TButton")
         hide_unlabeled_peaks_button.grid(row=0, column=0, sticky='ew', padx=5, pady=5)
 
-        # Create the Erase labels button
+        # Create the Delete labels button
         erase_button = ttk.Button(buttons_frame, text="Delete Labels", command=lambda: delete_labels(app, ax))
         erase_button.grid(row=0, column=1, sticky='ew', padx=5, pady=5)
 
+        # Create the Regenerate labels button (restores labels after deletion using current slider settings)
+        regenerate_button = ttk.Button(buttons_frame, text="Regenerate Labels", command=lambda: update_labels(app, ax, intensity_var, tolerance_var, font_size_var, prominence_var, hide_unlabeled_peaks_var))
+        regenerate_button.grid(row=0, column=2, sticky='ew', padx=5, pady=5)
+
         # Create the Reduce overlap button
         apply_button = ttk.Button(buttons_frame, text="Reduce label overlap", command=lambda: adjust_labels(app, ax, intensity_var, font_size_var, time_lim=3))
-        apply_button.grid(row=0, column=2, sticky='ew', padx=5, pady=5)
+        apply_button.grid(row=0, column=3, sticky='ew', padx=5, pady=5)
 
         # Add the Help button
         help_button = ttk.Button(buttons_frame, text="Help", command=open_help_document)
-        help_button.grid(row=0, column=3, sticky='ew', padx=5, pady=5)
+        help_button.grid(row=0, column=4, sticky='ew', padx=5, pady=5)
 
         # Create the Close button
         close_button = ttk.Button(buttons_frame, text="Close", command=tolerance_window.destroy)
-        close_button.grid(row=0, column=4, sticky='ew', padx=5, pady=5)
+        close_button.grid(row=0, column=5, sticky='ew', padx=5, pady=5)
 
         update_labels(app, ax, intensity_var, tolerance_var, font_size_var, prominence_var, hide_unlabeled_peaks_var)
 
@@ -266,32 +268,46 @@ def toggle_unlabeled_peaks(app, ax, hide_unlabeled_peaks_var):
     app.canvas.draw()
 
 def delete_labels(app, ax):
-    # Remove existing lines from the axes matplotlib
-    for line in ax.lines[1:]:
-        line.remove()
+    # Remove connector lines and vertical indicators (keep spectrum line at index 0)
+    while len(ax.lines) > 1:
+        ax.lines[-1].remove()
 
-    for text_obj in ax.texts:
+    # Remove all text objects from the axes
+    for text_obj in list(ax.texts):
         text_obj.remove()
 
-    # Remove existing peak labels
-    for text_obj in app.peak_labels:
-        text_obj.remove()
     app.peak_labels = []
     app.peak_values = []
+    app.peak_data = []
 
     # Redraw the canvas
     app.canvas.draw()
 
 #================================================================================================
 def adjust_labels(app, ax, intensity_var, font_size_var, time_lim=3):
+    if not app.peak_labels or not app.peak_values:
+        return
+
     threshold = app.current_threshold_percent / 100.0 * max(app.peak_values)
 
-    # Filter labels based on visibility and threshold
-    filtered_labels = [(text_obj, peak_value) for text_obj, peak_value in zip(app.peak_labels, app.peak_values) if text_obj.get_visible() and peak_value >= threshold]
+    # Filter labels based on visibility and threshold, keep original intensities
+    filtered_labels = [(text_obj, peak_value) for text_obj, peak_value in
+                       zip(app.peak_labels, app.peak_values)
+                       if text_obj.get_visible() and peak_value >= threshold]
+
+    if not filtered_labels:
+        return
 
     x = [text_obj.get_position()[0] for text_obj, _ in filtered_labels]
-    y = [text_obj.get_position()[1] for text_obj, _ in filtered_labels]
+    y = [peak_value for _, peak_value in filtered_labels]  # Use actual peak intensities as anchor points
     text_list = [text_obj.get_text() for text_obj, _ in filtered_labels]
+    original_intensities = list(y)  # Preserve for peak_values
+
+    # Remove old labels and connector lines before textalloc creates new ones
+    for text_obj in list(ax.texts):
+        text_obj.remove()
+    while len(ax.lines) > 1:
+        ax.lines[-1].remove()
 
     # Get spectrum line data so textalloc avoids placing labels on top of it
     x_line = np.array(app.x_data) if not isinstance(app.x_data, np.ndarray) else app.x_data
@@ -302,7 +318,7 @@ def adjust_labels(app, ax, intensity_var, font_size_var, time_lim=3):
     #   x_lines/y_lines  - avoid overlapping with the spectrum line
     #   margin            - add spacing between labels and objects
     #   avoid_label_lines_overlap - prevent connector lines from overlapping
-    ta.allocate(
+    result = ta.allocate(
         ax, x, y, text_list,
         x_scatter=x, y_scatter=y,
         x_lines=[x_line], y_lines=[y_line],
@@ -313,13 +329,13 @@ def adjust_labels(app, ax, intensity_var, font_size_var, time_lim=3):
         avoid_label_lines_overlap=True
     )
 
-    # Re-create and store the adjusted labels in app.peak_labels
-    for i, (x_val, y_val, text) in enumerate(zip(x, y, text_list)):
-        text_obj = ax.text(x_val, y_val, text, fontsize=font_size_var.get(), ha='center', va='bottom')
-        app.peak_labels.append(text_obj)
+    # Capture textalloc's text objects (3rd element of returned tuple)
+    _, _, text_objects, _ = result
+    app.peak_labels = list(text_objects)
+    app.peak_values = original_intensities  # Keep actual intensities, not adjusted label positions
 
-    # Call erase_labels function to remove existing labels
-    erase_labels(app, ax)
+    # Update peak data for export
+    extract_peak_info(app)
 
     # Redraw the canvas
     app.canvas.draw()
@@ -352,10 +368,8 @@ def erase_labels(app, ax):
 #================================================================================================
 
 def extract_peak_info(app):
-    #print("Extracting peak info from these labels:", [text_obj.get_text() for text_obj in app.peak_labels])  # Debug print
-
     peak_data = []
-    for text_obj in app.peak_labels:
+    for i, text_obj in enumerate(app.peak_labels):
         # Split the label text to separate the wavelength from the rest
         full_label = text_obj.get_text()
         label_parts = full_label.split(' (')
@@ -367,7 +381,8 @@ def extract_peak_info(app):
                 # Process the remaining string to extract element symbol and ionization level
                 rest = rest[:-1]  # Remove the closing parenthesis
                 element_symbol, ionization_level = rest.split(',')
-                relative_intensity = text_obj.get_position()[1]
+                # Use stored peak intensity (survives textalloc repositioning)
+                relative_intensity = app.peak_values[i] if i < len(app.peak_values) else text_obj.get_position()[1]
                 peak_data.append([wavelength, element_symbol.strip(), ionization_level.strip(), relative_intensity])
             else:
                 pass  # Skip the label if it does not contain a comma
