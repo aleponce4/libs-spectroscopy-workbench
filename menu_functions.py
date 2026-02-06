@@ -128,8 +128,6 @@ def import_data(app):
         else:
             replicate_data = pd.merge(replicate_data, data, on='Wavelength', how='outer')
 
-        print(f"Columns after importing file {i+1}: {replicate_data.columns}")
-
     if not all_data.empty:
         averaged_data = all_data.groupby('Wavelength').mean().reset_index()
         app.x_data, app.y_data = averaged_data['Wavelength'], averaged_data.iloc[:, 1:].mean(axis=1)

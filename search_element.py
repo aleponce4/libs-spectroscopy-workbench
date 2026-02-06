@@ -151,9 +151,12 @@ def periodic_table_window(app, ax):
 
 # ================================================================================================
 
+    # Store reference so label_peaks Back button can reopen it
+    app.periodic_window = periodic_window
+
     # Create a function to search for elements and ionization levels
     def apply_and_search(selected_elements, ionization_levels):
-        periodic_window.destroy()
+        periodic_window.withdraw()  # Hide instead of destroy so we can come back
         element_df = search_element(app, selected_elements, ionization_levels)
 
     # Add a variable for each ionization level checkbutton
@@ -236,8 +239,8 @@ def search_element(app, selected_elements, ionization_levels):
         messagebox.showinfo("Error", "Element not found")
         return None
 
-    # Store the filtered DataFrame in app.element_df
-    app.element_df = filtered_element_ionization_df
+    # Store the filtered DataFrame in app.element_df (.copy() avoids SettingWithCopyWarning)
+    app.element_df = filtered_element_ionization_df.copy()
 
     
     # Call the label_peaks function with the filtered DataFrame

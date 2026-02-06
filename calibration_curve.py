@@ -54,10 +54,7 @@ def import_calibration_data(app):
         else:
             all_data = pd.merge(all_data, data, on='wavelength', how='outer')
 
-        print(f"Columns after importing file {idx+1}: {all_data.columns}")
-
     if not all_data.empty:
-        print(f"Final columns after merging: {all_data.columns}")
         return all_data
     else:
         messagebox.showerror("Error", "No data imported.")

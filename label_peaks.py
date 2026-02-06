@@ -127,7 +127,17 @@ def label_peaks(app, ax, element_df):
         # Create the Hide unlabeled peaks toggle button
         hide_unlabeled_peaks_var = tk.BooleanVar()
         hide_unlabeled_peaks_button = ttk.Checkbutton(buttons_frame, text="Hide unlabeled peaks", variable=hide_unlabeled_peaks_var, command=lambda: toggle_unlabeled_peaks(app, ax, hide_unlabeled_peaks_var), style="Toggle.TButton")
-        hide_unlabeled_peaks_button.grid(row=0, column=0, sticky='ew', padx=5, pady=5)
+        hide_unlabeled_peaks_button.grid(row=1, column=0, columnspan=6, sticky='ew', padx=5, pady=5)
+
+        # Create the Back button (return to periodic table)
+        def go_back():
+            delete_labels(app, ax)
+            tolerance_window.destroy()
+            if hasattr(app, 'periodic_window') and app.periodic_window.winfo_exists():
+                app.periodic_window.deiconify()
+
+        back_button = ttk.Button(buttons_frame, text="\u2190 Back", command=go_back)
+        back_button.grid(row=0, column=0, sticky='ew', padx=5, pady=5)
 
         # Create the Delete labels button
         erase_button = ttk.Button(buttons_frame, text="Delete Labels", command=lambda: delete_labels(app, ax))
