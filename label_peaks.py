@@ -293,9 +293,25 @@ def adjust_labels(app, ax, intensity_var, font_size_var, time_lim=3):
     y = [text_obj.get_position()[1] for text_obj, _ in filtered_labels]
     text_list = [text_obj.get_text() for text_obj, _ in filtered_labels]
 
-    # Adjust the labels
-    ta.allocate_text(ax.figure, ax, x, y, text_list, x_scatter=x, y_scatter=y, textsize=font_size_var.get(), linecolor="black")
+    # Get spectrum line data so textalloc avoids placing labels on top of it
+    x_line = np.array(app.x_data) if not isinstance(app.x_data, np.ndarray) else app.x_data
+    y_line = np.array(app.y_data) if not isinstance(app.y_data, np.ndarray) else app.y_data
 
+    # Adjust the labels:
+    #   direction="north" - prefer placing labels above data points
+    #   x_lines/y_lines  - avoid overlapping with the spectrum line
+    #   margin            - add spacing between labels and objects
+    #   avoid_label_lines_overlap - prevent connector lines from overlapping
+    ta.allocate(
+        ax, x, y, text_list,
+        x_scatter=x, y_scatter=y,
+        x_lines=[x_line], y_lines=[y_line],
+        textsize=font_size_var.get(),
+        linecolor="black",
+        direction="north",
+        margin=0.01,
+        avoid_label_lines_overlap=True
+    )
 
     # Re-create and store the adjusted labels in app.peak_labels
     for i, (x_val, y_val, text) in enumerate(zip(x, y, text_list)):
