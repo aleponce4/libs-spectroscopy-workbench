@@ -15,6 +15,7 @@ from adjust_plot import adjust_plot
 import numpy as np
 from calibration_curve import apply_calibration_curve
 import csv
+from import_dialog import open_import_dialog
 
 from adjust_spectrum import adjust_spectrum as actual_adjust_spectrum
 from adjust_plot import adjust_plot as actual_adjust_plot
@@ -55,7 +56,7 @@ def create_sidebar(app):
     from presets_dialog import open_presets_dialog
     
     icons = [
-        ("Import Data", "Icons/Import_icon.png", functools.partial(import_data, app)),
+        ("Import Data", "Icons/Import_icon.png", functools.partial(open_import_dialog, app)),
         ("Adjust Spectrum", "Icons/spectrum_icon.png", functools.partial(adjust_spectrum, app, app.ax)),
         ("Adjust Plot", "Icons/plot_icon.png", functools.partial(adjust_plot, app, app.ax)),
         ("Adjustment Presets", "Icons/presets_icon.png", functools.partial(open_presets_dialog, app)),
