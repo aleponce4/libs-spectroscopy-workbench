@@ -29,25 +29,30 @@ def adjust_plot(app, ax, normalize=False):
         messagebox.showerror("Error", "Please import data before adjusting the plot.")
         return
 
+    # Store original y_data so normalization can be reversed
+    if not hasattr(app, '_original_y_data') or app._original_y_data is None:
+        app._original_y_data = app.y_data.copy()
+
     def update_plot():
         # Check if the normalization checkbox is checked, Normalize the data if needed
         if normalize_var.get():
-            y_data = normalize_data(app.y_data)
-            app.y_data = y_data  # Apply normalized data to the actual data in the program
+            y_data = normalize_data(app._original_y_data)
+            app.y_data = y_data
             app.line.set_ydata(y_data)
-            ax.set_ylim(0, 1)  # Set the y-axis limits for normalized data
+            ax.set_ylim(0, 1)
         else:
-            y_data = app.y_data
+            # Restore original data if it was previously normalized
+            app.y_data = app._original_y_data.copy()
+            app.line.set_ydata(app.y_data)
             ax.set_ylim(y_start.get(), y_end.get())
 
-            # Get the currently selected line object from the app class
+        # Get the currently selected line object from the app class
         line = app.line
         # Update the line object properties
         line.set_color(line_color.get())
         line.set_linewidth(line_width.get())
         # Update the axis limits and background color
         ax.set_xlim(x_start.get(), x_end.get())
-        ax.set_ylim(ax.get_ylim())  # Update the y-axis limits according to the normalization state
         ax.set_facecolor(mcolors.to_rgba(bg_color.get()))
         # Redraw the canvas to show the updated plot
         app.canvas.draw()
@@ -102,9 +107,19 @@ def adjust_plot(app, ax, normalize=False):
     tab2 = ttk.LabelFrame(notebook)
     notebook.add(tab2, text="Visual Adjustments")
 
-    line_color = tk.StringVar(value="#000000")  # Default line color: black
-    bg_color = tk.StringVar(value="#FFFFFF")  # Default background color: white
-    line_width = tk.DoubleVar(value=1)  # Default line width: 1
+    # Read actual values from the current plot line
+    current_line = ax.lines[-1] if ax.lines else None
+    if current_line:
+        raw_color = current_line.get_color()
+        initial_line_color = mcolors.to_hex(raw_color).upper()
+        initial_line_width = current_line.get_linewidth()
+    else:
+        initial_line_color = "#000000"
+        initial_line_width = 1.0
+
+    line_color = tk.StringVar(value=initial_line_color)
+    bg_color = tk.StringVar(value=mcolors.to_hex(ax.get_facecolor()).upper())
+    line_width = tk.DoubleVar(value=initial_line_width)
 
     ttk.Label(tab2, text="Line Color:").grid(row=0, column=0, padx=(20, 20), pady=(20, 20))
     ttk.Button(tab2, text="Select Color", command=lambda: update_line_color(app)).grid(row=0, column=1, padx=(20, 20), pady=(20, 20))
@@ -143,12 +158,7 @@ def adjust_plot(app, ax, normalize=False):
 
 #=======================================================================================================================   
 
-    # Retrieve the line object from the Axes object
-    line = ax.lines[-1] if ax.lines else None
 
-    if line:
-        line_color.set(line.get_color().upper())
-        bg_color.set(mcolors.to_hex(ax.get_facecolor()).upper())
 
 
 def open_help_document():

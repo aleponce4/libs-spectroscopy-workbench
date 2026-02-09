@@ -92,6 +92,7 @@ def reset_data(app):
     app.data = pd.DataFrame()
     app.x_data = pd.Series()
     app.y_data = pd.Series()
+    app._original_y_data = None
 
 # Function to import data from files
 def import_data(app):

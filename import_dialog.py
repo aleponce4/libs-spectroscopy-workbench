@@ -366,6 +366,7 @@ class ImportDialog:
         self.app.data = pd.DataFrame()
         self.app.x_data = pd.Series()
         self.app.y_data = pd.Series()
+        self.app._original_y_data = None
 
         all_data = pd.DataFrame()
         replicate_data = pd.DataFrame()
