@@ -14,16 +14,29 @@ from settings_manager import save_settings, load_settings, capture_plot_settings
 
 
 #=======================================================================================================================
-# Normalization function
-def normalize_data(y_data):
-    min_value = min(y_data)
-    max_value = max(y_data)
-    normalized_data = [(value - min_value) / (max_value - min_value) for value in y_data]
-    return np.array(normalized_data)  # Convert the normalized_data to a NumPy array
+# Normalization functions
+def normalize_min_max(y_data):
+    """Min-Max normalization: maps values to [0, 1]."""
+    y = np.asarray(y_data, dtype=float)
+    y_min, y_max = y.min(), y.max()
+    return (y - y_min) / (y_max - y_min)
+
+
+def normalize_total_intensity(y_data, eps=1e-12, clip_negative=True):
+    """
+    Total-intensity (area) normalization: y / sum(y).
+    Assumes baseline correction was already done.
+    Clips negatives to 0 by default to avoid sum distortion.
+    """
+    y = np.asarray(y_data, dtype=float)
+    if clip_negative:
+        y = np.clip(y, 0, None)
+    s = np.sum(y)
+    return y / (s + eps)
 
 
 # Main function for adjusting the plot
-def adjust_plot(app, ax, normalize=False):
+def adjust_plot(app, ax):
 
     if not app.line:
         messagebox.showerror("Error", "Please import data before adjusting the plot.")
@@ -34,14 +47,19 @@ def adjust_plot(app, ax, normalize=False):
         app._original_y_data = app.y_data.copy()
 
     def update_plot():
-        # Check if the normalization checkbox is checked, Normalize the data if needed
-        if normalize_var.get():
-            y_data = normalize_data(app._original_y_data)
+        method = normalize_var.get()
+        if method == "Min-Max":
+            y_data = normalize_min_max(app._original_y_data)
             app.y_data = y_data
             app.line.set_ydata(y_data)
             ax.set_ylim(0, 1)
+        elif method == "Total Intensity":
+            y_data = normalize_total_intensity(app._original_y_data)
+            app.y_data = y_data
+            app.line.set_ydata(y_data)
+            ax.set_ylim(0, y_data.max() * 1.05)
         else:
-            # Restore original data if it was previously normalized
+            # "None" – restore original data
             app.y_data = app._original_y_data.copy()
             app.line.set_ydata(app.y_data)
             ax.set_ylim(y_start.get(), y_end.get())
@@ -80,10 +98,12 @@ def adjust_plot(app, ax, normalize=False):
     tab1 = ttk.Frame(notebook)
     notebook.add(tab1, text="Adjust Axis")
 
-    # Add the normalization checkbox to the first tab
-    normalize_var = tk.BooleanVar(value=normalize)
-    normalize_checkbox = ttk.Checkbutton(tab1, text="Normalize", variable=normalize_var)
-    normalize_checkbox.grid(row=2, column=0, columnspan=4, pady=(10, 10))
+    # Add the normalization method selector
+    ttk.Label(tab1, text="Normalization:").grid(row=2, column=0, padx=(20, 5), pady=(10, 10), sticky="e")
+    normalize_var = tk.StringVar(value="None")
+    normalize_combo = ttk.Combobox(tab1, textvariable=normalize_var, state="readonly", width=18,
+                                   values=["None", "Min-Max", "Total Intensity"])
+    normalize_combo.grid(row=2, column=1, padx=(5, 20), pady=(10, 10), sticky="w")
 
     # Create variables to store the axis limits
     x_start = tk.DoubleVar(value=ax.get_xlim()[0])

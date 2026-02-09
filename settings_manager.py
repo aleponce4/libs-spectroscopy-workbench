@@ -70,7 +70,7 @@ def get_default_settings():
             "x_axis_end": 1000.0,
             "y_axis_start": 0.0,
             "y_axis_end": 1.0,
-            "normalize_enabled": False,
+            "normalize_method": "None",
             "line_color": "#000000",
             "background_color": "#FFFFFF",
             "line_width": 1.0
@@ -131,7 +131,7 @@ def capture_plot_settings(x_start_var, x_end_var, y_start_var, y_end_var,
         "line_color": line_color_var.get(),
         "background_color": bg_color_var.get(),
         "line_width": line_width_var.get(),
-        "normalize_enabled": normalize_var.get()
+        "normalize_method": normalize_var.get()
     }
     return settings
 
@@ -151,7 +151,11 @@ def apply_plot_settings(settings, x_start_var, x_end_var, y_start_var, y_end_var
         line_color_var.set(p.get("line_color", "#000000"))
         bg_color_var.set(p.get("background_color", "#FFFFFF"))
         line_width_var.set(p.get("line_width", 1.0))
-        normalize_var.set(p.get("normalize_enabled", False))
+        # Backward compat: old settings stored normalize_enabled as bool
+        method = p.get("normalize_method", None)
+        if method is None:
+            method = "Min-Max" if p.get("normalize_enabled", False) else "None"
+        normalize_var.set(method)
         return True
     except Exception as e:
         print(f"Error applying plot settings: {str(e)}")
