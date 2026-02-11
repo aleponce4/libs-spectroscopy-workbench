@@ -41,7 +41,12 @@ hidden_imports = [
     "pandas.io.formats.style", "pandas.plotting",
     
     # Additional imports for robustness
-    "pkg_resources.py2_warn", "pkg_resources", "openpyxl", "xlsxwriter", "certifi", "urllib3"
+    "pkg_resources.py2_warn", "pkg_resources", "openpyxl", "xlsxwriter", "certifi", "urllib3",
+    
+    # Acquisition mode modules
+    "seabreeze", "seabreeze.spectrometers", "usb", "usb.core", "usb.backend",
+    "mode_launcher", "acquisition_app", "acquisition_graph", "acquisition_sidebar",
+    "acquisition_worker", "spectrometer", "queue", "threading"
 ]
 
 # Build the command for PyInstaller
@@ -92,6 +97,7 @@ for hidden_import in hidden_imports:
 command.extend([
     "--collect-all", "ttkthemes",  # Collect all ttkthemes data
     "--collect-all", "sv_ttk",     # Collect all sv_ttk data
+    "--collect-all", "seabreeze",  # Collect all seabreeze data
 ])
 
 # Print the command to be executed (for debugging)

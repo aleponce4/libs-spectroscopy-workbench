@@ -20,12 +20,6 @@ sys.excepthook = global_exception_handler
 if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
     os.chdir(sys._MEIPASS)
 
-from libs_app import App
-
-if __name__ == "__main__":
-    my_app = App()
-    my_app.run()
-
 if getattr(sys, 'frozen', False):
     # Running as a compiled executable
     application_path = os.path.dirname(sys.executable)
@@ -35,5 +29,55 @@ if getattr(sys, 'frozen', False):
 
     # Set the environment variable for the SV_TTK_THEME
     os.environ['SV_TTK_THEME'] = os.path.join(application_path, 'sv_ttk', 'theme')
+
+
+def main():
+    """Main entry point — shows the mode launcher, then opens the selected mode."""
+    from mode_launcher import ModeLauncher
+
+    # Show the mode selection launcher
+    launcher = ModeLauncher()
+    selected_mode = launcher.run()
+
+    if selected_mode is None:
+        # User closed the launcher without selecting a mode
+        sys.exit(0)
+
+    if selected_mode == "Analysis":
+        from libs_app import App
+        app = App()
+        app.run()
+
+    elif selected_mode == "Acquisition":
+        from acquisition_app import AcquisitionApp
+        acq_app = AcquisitionApp()
+        acq_app.run()
+
+        # Check if there's data to hand off to Analysis mode
+        handoff = acq_app.get_handoff_data()
+        if handoff is not None:
+            from libs_app import App
+            import pandas as pd
+
+            app = App()
+
+            # Load the captured spectrum directly into the analysis app
+            app.x_data = pd.Series(handoff["wavelengths"])
+            app.y_data = pd.Series(handoff["intensities"])
+            app.ax.clear()
+            app.ax.plot(app.x_data, app.y_data)
+            app.line = app.ax.lines[-1]
+            app.ax.set_xlim([app.x_data.min(), app.x_data.max()])
+            app.ax.set_xlabel("Wavelength (nm)")
+            app.ax.set_ylabel("Relative Intensity")
+            app.ax.set_title("Acquired Spectrum")
+            app.ax.grid(which='both', linestyle='--', linewidth=0.5)
+            app.canvas.draw()
+
+            app.run()
+
+
+if __name__ == "__main__":
+    main()
 
 
