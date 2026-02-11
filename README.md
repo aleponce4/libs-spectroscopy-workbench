@@ -2,20 +2,24 @@
 
 A standalone Windows application for Laser Induced Breakdown Spectroscopy (LIBS) data analysis. This tool allows users to import, adjust, and analyze LIBS data, offering functionalities such as spectrum adjustment, plotting, and elemental line identification using a built-in periodic table.
 
-## Features
+## Modes
 
-- **Import Data**: Easily load your LIBS data for analysis.
-- **Adjust Spectrum**: Normalize your data and apply various smoothing methods:
-  - **Moving Average**
-  - **Gaussian Filter**
-  - **Savitzky-Golay Filter**
-  - **Median Filter**
-  - **Wavelet Transform**
-- **Adjust Plot**: Customize plot appearance, including axis adjustments and line aesthetics.
-- **Export**: Save your adjusted plots and data for further use or reporting.
-- **Search Element**: A comprehensive module that provides a periodic table interface. Select elements, specify database sources, ionization levels, labeling preferences, and set thresholds for line identification.
-- **Calibration-Free Module** (In Development): Aims to offer quantitative/calibration-free LIBS analysis. Note: This module requires a spectrometer with high resolution.
-- **Acquisition Function** (In Development): Integration with the Ocean Optic spectrometer for simultaneous data acquisition and analysis.
+The application launches with a mode selector:
+
+### Analysis Mode
+- **Import Data**: Load LIBS spectral data files.
+- **Adjust Spectrum**: Normalize and smooth (Moving Average, Gaussian, Savitzky-Golay, Median, Wavelet).
+- **Adjust Plot**: Customize plot appearance and axis settings.
+- **Search Element**: Periodic table interface for elemental line identification.
+- **Export**: Save plots and processed data.
+
+### Acquisition Mode
+- **Spectrometer Control**: Connect to an Ocean Optics USB4000 via python-seabreeze.
+- **Live View**: Real-time spectrum display with configurable integration time and averaging.
+- **Hardware Trigger**: Arm external edge trigger for laser-synchronized capture.
+- **Auto-Save**: Automatic saving of triggered spectra with sample naming and shot counter.
+- **Send to Analysis**: Hand off captured spectra directly to Analysis Mode (no disk I/O).
+- **Simulation Mode**: Built-in simulated spectrometer for testing without hardware.
 
 ## Installation
 
@@ -41,8 +45,8 @@ The software is provided as a standalone executable for Windows. No installation
 
 ## Usage
 
-1. **Run the Software**: Simply double-click the downloaded executable to start or run `main.py` if using the source code.
-2. **Import Data**: Use the 'Import Data' function to load your LIBS data.
+1. **Run the Software**: Double-click the executable, or run `python main.py` from source.
+2. **Choose a Mode**: Select Analysis or Acquisition from the launcher.
 ![Alt text](images/1.png)
 3. **Adjust and Analyze**: 
 
