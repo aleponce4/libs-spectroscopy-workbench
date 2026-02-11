@@ -94,6 +94,14 @@ def create_acquisition_sidebar(app):
     )
     app.arm_btn.grid(row=1, column=0, padx=5, pady=3, sticky="ew")
 
+    # Test Trigger button
+    app.test_trigger_btn = ttk.Button(
+        acq_frame, text="Test Trigger",
+        compound='left', style="LeftAligned.TButton", width=18,
+        command=app.on_test_trigger, state="disabled"
+    )
+    app.test_trigger_btn.grid(row=2, column=0, padx=5, pady=3, sticky="ew")
+
     # Stop button
     try:
         stop_icon = Image.open("Icons/clean_icon.png").resize(icon_size, Image.LANCZOS)
@@ -106,7 +114,7 @@ def create_acquisition_sidebar(app):
         compound='left', style="LeftAligned.TButton", width=18,
         command=app.on_stop, state="disabled"
     )
-    app.stop_btn.grid(row=2, column=0, padx=5, pady=3, sticky="ew")
+    app.stop_btn.grid(row=3, column=0, padx=5, pady=3, sticky="ew")
 
     # ─── Integration Time ──────────────────────────────────────────────
     int_frame = ttk.LabelFrame(app.sidebar_frame, text="Integration Time", padding=5)
@@ -130,6 +138,19 @@ def create_acquisition_sidebar(app):
     avg_spinbox = ttk.Spinbox(int_frame, from_=1, to=100, width=5,
                                textvariable=app.averages_var, command=app.on_averages_changed)
     avg_spinbox.grid(row=1, column=1, columnspan=2, padx=5, pady=3, sticky="w")
+
+    # Corrections
+    app.correct_dark_var = tk.BooleanVar(value=False)
+    dark_check = ttk.Checkbutton(int_frame, text="Dark count correction",
+                                  variable=app.correct_dark_var,
+                                  command=app.on_corrections_changed)
+    dark_check.grid(row=2, column=0, columnspan=3, padx=5, pady=2, sticky="w")
+
+    app.correct_nl_var = tk.BooleanVar(value=False)
+    nl_check = ttk.Checkbutton(int_frame, text="Nonlinearity correction",
+                                variable=app.correct_nl_var,
+                                command=app.on_corrections_changed)
+    nl_check.grid(row=3, column=0, columnspan=3, padx=5, pady=2, sticky="w")
 
     # ─── Auto-Save Settings ────────────────────────────────────────────
     save_frame = ttk.LabelFrame(app.sidebar_frame, text="Auto-Save", padding=5)

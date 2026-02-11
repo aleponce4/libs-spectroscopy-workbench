@@ -9,6 +9,7 @@ import numpy as np
 import logging
 import os
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, Future
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ class AcquisitionMessage:
     CAPTURED = "captured"          # A triggered capture completed
     STOPPED = "stopped"            # Worker has stopped
     SAVE_COMPLETE = "save_complete"  # Auto-save finished
+    IDLE = "idle"                      # Worker returned to idle (buttons should reset)
 
 
 class AcquisitionWorker(threading.Thread):
@@ -41,6 +43,7 @@ class AcquisitionWorker(threading.Thread):
     STATE_IDLE = "IDLE"
     STATE_LIVE = "LIVE"
     STATE_ARMED = "ARMED"
+    STATE_TEST = "TEST"
 
     def __init__(self, spectrometer_module):
         """
@@ -70,6 +73,10 @@ class AcquisitionWorker(threading.Thread):
 
         # Averaging
         self.averages = 1  # Number of spectra to average in LIVE mode
+
+        # Correction flags (passed to spectrometer.get_intensities)
+        self.correct_dark_counts = False
+        self.correct_nonlinearity = False
 
     # ─── State Management ──────────────────────────────────────────────
 
@@ -125,6 +132,17 @@ class AcquisitionWorker(threading.Thread):
                 pass
         self._send(AcquisitionMessage.STATUS, "Idle")
 
+    def test_trigger(self):
+        """Queue a test capture to run on the worker thread.
+        Does a normal-mode read pushed through the full capture pipeline
+        (plot, shot counter, auto-save) to verify software is working
+        before waiting for the real laser pulse."""
+        if not self.spec.is_connected:
+            self._send(AcquisitionMessage.ERROR, "Spectrometer not connected.")
+            return
+        self._set_state(self.STATE_TEST)
+        self._send(AcquisitionMessage.STATUS, "Running test capture...")
+
     def stop(self):
         """Signal the worker thread to terminate."""
         self._stop_event.set()
@@ -147,6 +165,8 @@ class AcquisitionWorker(threading.Thread):
                     self._run_live()
                 elif current_state == self.STATE_ARMED:
                     self._run_armed()
+                elif current_state == self.STATE_TEST:
+                    self._run_test()
                 else:
                     # IDLE — wait for a state change event
                     self._state_change_event.wait(timeout=0.5)
@@ -166,14 +186,20 @@ class AcquisitionWorker(threading.Thread):
                     # Average multiple spectra
                     accumulated = None
                     for _ in range(self.averages):
-                        intensities = self.spec.get_intensities()
+                        intensities = self.spec.get_intensities(
+                            correct_dark_counts=self.correct_dark_counts,
+                            correct_nonlinearity=self.correct_nonlinearity
+                        )
                         if accumulated is None:
                             accumulated = intensities.astype(np.float64)
                         else:
                             accumulated += intensities
                     intensities = accumulated / self.averages
                 else:
-                    intensities = self.spec.get_intensities()
+                    intensities = self.spec.get_intensities(
+                        correct_dark_counts=self.correct_dark_counts,
+                        correct_nonlinearity=self.correct_nonlinearity
+                    )
 
                 wavelengths = self.spec.get_wavelengths()
                 self._send(AcquisitionMessage.SPECTRUM, (wavelengths, intensities))
@@ -188,12 +214,40 @@ class AcquisitionWorker(threading.Thread):
             time.sleep(self.live_poll_interval)
 
     def _run_armed(self):
-        """Wait for a single hardware trigger, capture, auto-save, then return to IDLE."""
+        """Wait for a single hardware trigger, capture, auto-save, then return to IDLE.
+        
+        The blocking intensities() call runs in a disposable thread so that
+        if the user clicks Stop, we can detect the state change and avoid
+        freezing the worker thread.  The blocking USB read will eventually
+        return or timeout on its own once we flip the trigger mode back to
+        normal in go_idle().
+        """
         try:
             self._send(AcquisitionMessage.STATUS, "Armed — waiting for laser trigger...")
 
-            # This call BLOCKS until the trigger signal is received
-            intensities = self.spec.get_intensities()
+            # Launch the blocking read in a throwaway thread
+            executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="TriggerRead")
+            future: Future = executor.submit(
+                self.spec.get_intensities,
+                correct_dark_counts=self.correct_dark_counts,
+                correct_nonlinearity=self.correct_nonlinearity,
+            )
+
+            # Poll the future so we can bail out if the user cancels
+            while not future.done():
+                if self.state != self.STATE_ARMED or self._stop_event.is_set():
+                    # User pressed Stop or we're shutting down.
+                    # go_idle() already flipped trigger mode to 0 which should
+                    # unblock the USB read.  Just abandon the future.
+                    self._send(AcquisitionMessage.STATUS, "Trigger cancelled.")
+                    executor.shutdown(wait=False)
+                    return
+                time.sleep(0.1)  # Check 10× per second
+
+            # If we get here the capture completed
+            intensities = future.result()  # re-raises any exception from thread
+            executor.shutdown(wait=False)
+
             wavelengths = self.spec.get_wavelengths()
 
             self._shot_index += 1
@@ -225,6 +279,39 @@ class AcquisitionWorker(threading.Thread):
             except Exception:
                 pass
         self._set_state(self.STATE_IDLE)
+        self._send(AcquisitionMessage.IDLE, None)
+
+    def _run_test(self):
+        """One-shot normal-mode read pushed through the full capture pipeline."""
+        try:
+            # Ensure normal mode for immediate read
+            if self.spec.current_trigger_mode != 0:
+                self.spec.set_trigger_mode(0)
+
+            intensities = self.spec.get_intensities(
+                correct_dark_counts=self.correct_dark_counts,
+                correct_nonlinearity=self.correct_nonlinearity
+            )
+            wavelengths = self.spec.get_wavelengths()
+
+            self._shot_index += 1
+            self._send(AcquisitionMessage.SPECTRUM, (wavelengths, intensities))
+            self._send(AcquisitionMessage.CAPTURED, {
+                "wavelengths": wavelengths,
+                "intensities": intensities,
+                "shot_index": self._shot_index
+            })
+            self._send(AcquisitionMessage.STATUS,
+                        f"Test capture #{self._shot_index} — pipeline OK")
+
+            if self.auto_save_enabled:
+                self._auto_save(wavelengths, intensities)
+
+        except Exception as e:
+            self._send(AcquisitionMessage.ERROR, f"Test trigger failed: {e}")
+        finally:
+            self._set_state(self.STATE_IDLE)
+            self._send(AcquisitionMessage.IDLE, None)
 
     # ─── Auto-Save ─────────────────────────────────────────────────────
 

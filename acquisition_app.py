@@ -125,6 +125,7 @@ class AcquisitionApp:
         self.disconnect_btn.config(state="normal")
         self.live_btn.config(state="normal")
         self.arm_btn.config(state="normal")
+        self.test_trigger_btn.config(state="normal")
         self.apply_int_btn.config(state="normal")
 
         # Start the worker thread
@@ -157,6 +158,7 @@ class AcquisitionApp:
         self.disconnect_btn.config(state="disabled")
         self.live_btn.config(state="disabled")
         self.arm_btn.config(state="disabled")
+        self.test_trigger_btn.config(state="disabled")
         self.stop_btn.config(state="disabled")
         self.apply_int_btn.config(state="disabled")
 
@@ -166,6 +168,7 @@ class AcquisitionApp:
             self.worker.start_live()
             self.live_btn.config(state="disabled")
             self.arm_btn.config(state="disabled")
+            self.test_trigger_btn.config(state="disabled")
             self.stop_btn.config(state="normal")
             self.worker_state_var.set("State: LIVE")
 
@@ -175,8 +178,19 @@ class AcquisitionApp:
             self.worker.arm_trigger()
             self.live_btn.config(state="disabled")
             self.arm_btn.config(state="disabled")
+            self.test_trigger_btn.config(state="disabled")
             self.stop_btn.config(state="normal")
             self.worker_state_var.set("State: ARMED")
+
+    def on_test_trigger(self):
+        """Fire a test capture using normal mode to verify the full pipeline."""
+        if self.worker:
+            self.worker.test_trigger()
+            self.live_btn.config(state="disabled")
+            self.arm_btn.config(state="disabled")
+            self.test_trigger_btn.config(state="disabled")
+            self.stop_btn.config(state="normal")
+            self.worker_state_var.set("State: TEST")
 
     def on_stop(self):
         """Stop acquisition (live view or disarm trigger)."""
@@ -184,6 +198,7 @@ class AcquisitionApp:
             self.worker.go_idle()
             self.live_btn.config(state="normal")
             self.arm_btn.config(state="normal")
+            self.test_trigger_btn.config(state="normal")
             self.stop_btn.config(state="disabled")
             self.worker_state_var.set("State: IDLE")
 
@@ -209,6 +224,12 @@ class AcquisitionApp:
                 self.worker.averages = max(1, int(self.averages_var.get()))
             except ValueError:
                 pass
+
+    def on_corrections_changed(self):
+        """Update dark count and nonlinearity correction flags in the worker."""
+        if self.worker:
+            self.worker.correct_dark_counts = self.correct_dark_var.get()
+            self.worker.correct_nonlinearity = self.correct_nl_var.get()
 
     def on_auto_save_toggle(self):
         """Toggle auto-save on/off."""
@@ -321,6 +342,15 @@ class AcquisitionApp:
                     # Return buttons to idle state
                     self.live_btn.config(state="normal")
                     self.arm_btn.config(state="normal")
+                    self.test_trigger_btn.config(state="normal")
+                    self.stop_btn.config(state="disabled")
+                    self.worker_state_var.set("State: IDLE")
+
+                elif msg_type == AcquisitionMessage.IDLE:
+                    # Worker returned to idle — restore button state
+                    self.live_btn.config(state="normal")
+                    self.arm_btn.config(state="normal")
+                    self.test_trigger_btn.config(state="normal")
                     self.stop_btn.config(state="disabled")
                     self.worker_state_var.set("State: IDLE")
 

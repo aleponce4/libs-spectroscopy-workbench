@@ -128,12 +128,3 @@ def clear_highlight(ax, canvas, highlight_line):
         pass
     ax.set_title("Live Spectrum")
     canvas.draw_idle()
-
-
-def clear_highlight(ax, canvas, highlight_line):
-    """Remove the highlight line after a delay."""
-    try:
-        highlight_line.remove()
-        canvas.draw_idle()
-    except Exception:
-        pass

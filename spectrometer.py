@@ -175,18 +175,24 @@ class SpectrometerModule:
     def connect(self) -> str:
         """
         Lazy-import seabreeze, discover devices, and open the first available spectrometer.
+        Performs a verification read to confirm communication is working.
         
         Returns:
-            A status string describing the connected device.
+            A multi-line status string with device details.
             
         Raises:
             SpectrometerError: If seabreeze is not installed, no device is found,
                                or the connection fails.
         """
-        # Lazy import
+        # Lazy import — try cseabreeze first, fall back to pyseabreeze
         try:
             import seabreeze
-            seabreeze.use("cseabreeze")  # Prefer the C backend
+            try:
+                seabreeze.use("cseabreeze")
+                logger.info("Using cseabreeze backend")
+            except Exception:
+                seabreeze.use("pyseabreeze")
+                logger.info("cseabreeze unavailable, using pyseabreeze backend")
             from seabreeze.spectrometers import Spectrometer, list_devices
             self._sb = seabreeze
         except ImportError:
@@ -211,6 +217,11 @@ class SpectrometerModule:
                 "  3. No other software (OceanView) is using the device"
             )
 
+        # Log all discovered devices
+        logger.info(f"Found {len(devices)} device(s):")
+        for i, dev in enumerate(devices):
+            logger.info(f"  [{i}] {dev}")
+
         # Open the first device
         try:
             self._spec = Spectrometer(devices[0])
@@ -220,13 +231,57 @@ class SpectrometerModule:
         # Cache wavelengths (they never change for a given device)
         self._wavelengths = self._spec.wavelengths()
 
+        # Query device capabilities
+        pixel_count = self._spec.pixels
+        wl_min = round(self._wavelengths[0], 1)
+        wl_max = round(self._wavelengths[-1], 1)
+        try:
+            int_limits = self._spec.integration_time_micros_limits
+            int_min_us, int_max_us = int_limits
+            int_min_ms = int_min_us / 1000.0
+            int_max_ms = int_max_us / 1000.0
+        except Exception:
+            int_min_ms, int_max_ms = None, None
+        try:
+            max_intensity = self._spec.max_intensity
+        except Exception:
+            max_intensity = None
+
         # Set default integration time
         self.set_integration_time(self._integration_time_us)
 
         # Ensure we start in normal trigger mode
         self.set_trigger_mode(self.TRIGGER_NORMAL)
 
-        status = f"Connected: {self.model} (S/N: {self.serial_number})"
+        # Verification read — confirm the device actually responds
+        try:
+            test_spectrum = self._spec.intensities()
+            if len(test_spectrum) != pixel_count:
+                logger.warning(f"Verification: expected {pixel_count} pixels, got {len(test_spectrum)}")
+            else:
+                logger.info(f"Verification read OK: {pixel_count} pixels returned")
+        except Exception as e:
+            # Device opened but can't read — close and report
+            try:
+                self._spec.close()
+            except Exception:
+                pass
+            self._spec = None
+            self._wavelengths = None
+            raise SpectrometerError(
+                f"Spectrometer opened but failed verification read:\n{e}\n\n"
+                "The device may be in a bad state. Try unplugging and reconnecting."
+            )
+
+        # Build informative status string
+        status_lines = [f"Connected: {self.model} (S/N: {self.serial_number})"]
+        status_lines.append(f"Pixels: {pixel_count} | Range: {wl_min}–{wl_max} nm")
+        if int_min_ms is not None:
+            status_lines.append(f"Integration: {int_min_ms}–{int_max_ms} ms")
+        if max_intensity is not None:
+            status_lines.append(f"Max intensity: {max_intensity:.0f}")
+
+        status = "\n".join(status_lines)
         logger.info(status)
         return status
 
@@ -236,7 +291,7 @@ class SpectrometerModule:
         Useful for testing the GUI without real hardware.
         
         Returns:
-            A status string.
+            A multi-line status string.
         """
         self._spec = _SimulatedSpectrometer()
         self._wavelengths = self._spec.wavelengths()
@@ -244,7 +299,15 @@ class SpectrometerModule:
         self._current_trigger_mode = self.TRIGGER_NORMAL
         self._simulated = True
 
-        status = f"Connected: {self.model} (S/N: {self.serial_number}) [SIMULATED]"
+        wl_min = round(self._wavelengths[0], 1)
+        wl_max = round(self._wavelengths[-1], 1)
+
+        status_lines = [
+            f"Connected: {self.model} (S/N: {self.serial_number}) [SIMULATED]",
+            f"Pixels: {self._spec._pixels} | Range: {wl_min}–{wl_max} nm",
+            "Integration: 0.01–65535.0 ms",
+        ]
+        status = "\n".join(status_lines)
         logger.info(status)
         return status
 
@@ -318,12 +381,17 @@ class SpectrometerModule:
             raise SpectrometerError("Spectrometer not connected.")
         return self._wavelengths.copy()
 
-    def get_intensities(self) -> np.ndarray:
+    def get_intensities(self, correct_dark_counts: bool = False,
+                         correct_nonlinearity: bool = False) -> np.ndarray:
         """
         Acquire one spectrum.
         
         In Normal mode (0), returns immediately after integration.
         In External HW Edge mode (3), BLOCKS until a trigger signal is received.
+        
+        Args:
+            correct_dark_counts: Subtract average dark pixel value (hardware only).
+            correct_nonlinearity: Apply stored nonlinearity correction (hardware only).
         
         Returns:
             np.ndarray of intensity values.
@@ -332,7 +400,12 @@ class SpectrometerModule:
             raise SpectrometerError("Spectrometer not connected.")
         
         try:
-            return self._spec.intensities()
+            if self._simulated:
+                return self._spec.intensities()
+            return self._spec.intensities(
+                correct_dark_counts=correct_dark_counts,
+                correct_nonlinearity=correct_nonlinearity
+            )
         except Exception as e:
             raise SpectrometerError(f"Acquisition error: {e}")
 
