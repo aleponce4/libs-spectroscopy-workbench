@@ -24,8 +24,11 @@ if getattr(sys, 'frozen', False):
     # Running as a compiled executable
     application_path = os.path.dirname(sys.executable)
 
-    # Set the environment variable for the TCL_LIBRARY
-    os.environ['TCL_LIBRARY'] = os.path.join(application_path, 'lib', 'tcl8.6')
+    # In --onefile mode, data files are extracted to sys._MEIPASS (a temp dir),
+    # NOT next to the exe. Point Tcl/Tk there so init.tcl is found.
+    base_path = getattr(sys, '_MEIPASS', application_path)
+    os.environ['TCL_LIBRARY'] = os.path.join(base_path, 'lib', 'tcl8.6')
+    os.environ['TK_LIBRARY']  = os.path.join(base_path, 'lib', 'tk8.6')
 
     # Set the environment variable for the SV_TTK_THEME
     os.environ['SV_TTK_THEME'] = os.path.join(application_path, 'sv_ttk', 'theme')

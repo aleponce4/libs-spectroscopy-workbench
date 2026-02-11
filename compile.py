@@ -1,11 +1,21 @@
 import os
 import subprocess
+import tkinter
 from datetime import datetime
 
 # Define paths and options
 main_script = os.path.abspath("main.py")
 base_output_dir = os.path.abspath("Compiled version")  # Output to local folder
 icon_path = os.path.abspath("Icons\\main_icon.ico")
+
+# Locate Tcl/Tk library directories so PyInstaller bundles init.tcl
+_root = tkinter.Tk(); _root.withdraw()
+_tcl_dir = _root.tk.eval("info library")   # e.g. .../tcl/tcl8.6
+_tk_dir = os.path.join(os.path.dirname(_tcl_dir),
+                       f"tk{_root.tk.eval('info patchlevel').rsplit('.', 1)[0]}")
+_root.destroy()
+tcl_library_path = os.path.normpath(_tcl_dir)
+tk_library_path  = os.path.normpath(_tk_dir)
 
 # Create a new directory with a timestamp
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -83,6 +93,10 @@ command = [
     # Add directories
     f"--add-data={os.path.abspath('Help')};Help", 
     f"--add-data={os.path.abspath('images')};images",
+    
+    # Add Tcl/Tk libraries so init.tcl is found at runtime
+    f"--add-data={tcl_library_path};lib/tcl8.6",
+    f"--add-data={tk_library_path};lib/tk8.6",
     
     # Set name to LIBS
     "--name=LIBS",
