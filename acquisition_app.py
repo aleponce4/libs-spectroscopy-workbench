@@ -21,7 +21,8 @@ class AcquisitionApp:
     Acquisition Mode application.
     
     Provides:
-        - Spectrometer connection via SpectrometerModule (any Ocean Optics model)
+        - Spectrometer connection via SpectrometerModule (Ocean Optics) or
+          ThorlabsCCSModule (CCS100/125/150/175/200) — user picks brand on connect
         - Live spectrum preview (continuous polling)
         - Hardware-triggered single-shot capture (external edge trigger)
         - Auto-save of captured spectra
@@ -80,10 +81,28 @@ class AcquisitionApp:
     # ═══════════════════════════════════════════════════════════════════
 
     def on_connect(self):
-        """Connect to the spectrometer."""
-        from spectrometer import SpectrometerModule, SpectrometerError, NoDeviceError
+        """Connect to the spectrometer — asks the user which brand first."""
+        from spectrometer import (
+            SpectrometerModule, ThorlabsCCSModule,
+            SpectrometerError, NoDeviceError,
+        )
 
-        self.spectrometer = SpectrometerModule()
+        # ── Brand selection dialog ─────────────────────────────────────
+        brand = self._ask_brand()
+        if brand is None:
+            return  # user cancelled
+
+        if brand == "ocean_optics":
+            self.spectrometer = SpectrometerModule()
+            sim_profile = None  # auto-detect (Generic / USB4000 / etc.)
+        elif brand == "thorlabs":
+            self.spectrometer = ThorlabsCCSModule()
+            sim_profile = "CCS175"
+        else:
+            # Simulation-only shortcut
+            self.spectrometer = SpectrometerModule()
+            sim_profile = None
+
         try:
             status = self.spectrometer.connect()
         except NoDeviceError:
@@ -95,20 +114,21 @@ class AcquisitionApp:
                 "(Generates synthetic LIBS spectra for testing)"
             )
             if result:
-                status = self.spectrometer.connect_simulated()
+                status = self.spectrometer.connect_simulated(
+                    sim_profile) if sim_profile else self.spectrometer.connect_simulated()
             else:
                 self.spectrometer = None
                 return
         except SpectrometerError as e:
-            # seabreeze not installed — offer simulation directly
+            # Driver not installed — offer simulation directly
             result = messagebox.askyesno(
                 "Connection Error",
                 f"{e}\n\n"
                 "Would you like to use Simulation Mode instead?"
             )
             if result:
-                self.spectrometer = SpectrometerModule()
-                status = self.spectrometer.connect_simulated()
+                status = self.spectrometer.connect_simulated(
+                    sim_profile) if sim_profile else self.spectrometer.connect_simulated()
             else:
                 self.spectrometer = None
                 return
@@ -422,6 +442,54 @@ class AcquisitionApp:
             from acquisition_graph import clear_highlight
             clear_highlight(self.ax, self.canvas, self._highlight_line)
             self._highlight_line = None
+
+    # ═══════════════════════════════════════════════════════════════════
+    #  Brand selection dialog
+    # ═══════════════════════════════════════════════════════════════════
+
+    def _ask_brand(self) -> str | None:
+        """
+        Show a small dialog asking the user to pick a spectrometer brand.
+        
+        Returns ``"ocean_optics"``, ``"thorlabs"``, or ``None`` if cancelled.
+        """
+        result = {"value": None}
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Select Spectrometer Brand")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        dlg.transient(self.root)
+
+        # Centre on parent
+        dlg.update_idletasks()
+        pw = self.root.winfo_width()
+        ph = self.root.winfo_height()
+        px = self.root.winfo_x()
+        py = self.root.winfo_y()
+        dw, dh = 340, 170
+        dlg.geometry(f"{dw}x{dh}+{px + (pw - dw) // 2}+{py + (ph - dh) // 2}")
+
+        ttk.Label(dlg, text="Which spectrometer brand?",
+                  font=("Segoe UI", 11, "bold")).pack(pady=(18, 10))
+
+        btn_frame = ttk.Frame(dlg)
+        btn_frame.pack(pady=4)
+
+        def _pick(brand):
+            result["value"] = brand
+            dlg.destroy()
+
+        ttk.Button(btn_frame, text="Ocean Optics", width=16,
+                   command=lambda: _pick("ocean_optics")).pack(side=tk.LEFT, padx=8)
+        ttk.Button(btn_frame, text="Thorlabs CCS", width=16,
+                   command=lambda: _pick("thorlabs")).pack(side=tk.LEFT, padx=8)
+
+        ttk.Button(dlg, text="Cancel", width=10,
+                   command=dlg.destroy).pack(pady=(10, 0))
+
+        dlg.wait_window()
+        return result["value"]
 
     # ═══════════════════════════════════════════════════════════════════
     #  Lifecycle

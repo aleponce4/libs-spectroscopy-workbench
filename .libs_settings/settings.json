@@ -1,7 +1,7 @@
 {
   "adjust_spectrum": {
-    "smoothing_method": "Moving average",
-    "smoothing_strength": 0,
+    "smoothing_method": "Savitzky-Golay filter",
+    "smoothing_strength": 13,
     "laser_removal_enabled": false,
     "laser_wavelength": 532.63,
     "laser_removal_width": 2.0,

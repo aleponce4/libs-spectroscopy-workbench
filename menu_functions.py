@@ -206,21 +206,41 @@ def export_plot(app, ax):
 
 # Function to export the data
 def export_data(app):
+    # Check that there is at least spectrum data to export
+    if app.x_data is None or (hasattr(app.x_data, '__len__') and len(app.x_data) == 0):
+        messagebox.showinfo("No data", "No spectrum data to export. Import data first.")
+        return
+
     filetypes = [("CSV files", "*.csv"), ("Excel files", "*.xlsx")]
-    file_path = filedialog.asksaveasfilename(title="Select a file", filetypes=filetypes, defaultextension=".csv")
+    file_path = filedialog.asksaveasfilename(title="Save processed spectrum", filetypes=filetypes, defaultextension=".csv")
 
     if file_path:
-        if not app.peak_data:
-            messagebox.showinfo("No data", "No peak data to export.")
-            return
-
-        df = pd.DataFrame(app.peak_data, columns=["wavelength", "element_symbol", "ionization_level", "relative_intensity"])
         file_extension = os.path.splitext(file_path)[1]
+        base_name = os.path.splitext(file_path)[0]
+
+        # --- Always save the processed spectrum ---
+        spectrum_df = pd.DataFrame({
+            "wavelength": app.x_data,
+            "intensity": app.y_data
+        })
         if file_extension == ".csv":
-            df.to_csv(file_path, index=False)
+            spectrum_df.to_csv(file_path, index=False)
         elif file_extension == ".xlsx":
-            df.to_excel(file_path, index=False)
-        messagebox.showinfo("Export Successful", f"The data was successfully exported to {file_path}")
+            spectrum_df.to_excel(file_path, index=False)
+
+        saved_msg = f"Processed spectrum saved to:\n{file_path}"
+
+        # --- If peak data exists, save it in a separate file ---
+        if app.peak_data:
+            peak_file = f"{base_name}_peaks{file_extension}"
+            peak_df = pd.DataFrame(app.peak_data, columns=["wavelength", "element_symbol", "ionization_level", "relative_intensity"])
+            if file_extension == ".csv":
+                peak_df.to_csv(peak_file, index=False)
+            elif file_extension == ".xlsx":
+                peak_df.to_excel(peak_file, index=False)
+            saved_msg += f"\n\nPeak data saved to:\n{peak_file}"
+
+        messagebox.showinfo("Export Successful", saved_msg)
 
 
 ########################################################################################################################

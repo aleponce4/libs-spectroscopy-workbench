@@ -1,19 +1,17 @@
 # spectrometer.py - Hardware abstraction layer for optical spectrometers.
-# Uses python-seabreeze with lazy loading — seabreeze is only imported when connect() is called.
-# Includes a built-in simulation mode for testing without hardware.
 #
-# Architecture note:
-#   SpectrometerModule is the concrete class for Ocean Optics / Ocean Insight
-#   spectrometers via python-seabreeze.  It is designed so that a future
-#   SpectrometerBase ABC can be extracted if support for other brands
-#   (Avantes, Thorlabs, Broadcom, StellarNet …) is ever needed.
-#   Any code that *consumes* a spectrometer should depend only on the public
-#   interface of SpectrometerModule (properties + methods), making it easy to
-#   swap in an alternative backend later.
+# Multi-brand architecture:
+#   SpectrometerBase      – ABC defining the interface every backend must implement.
+#   SpectrometerModule    – Ocean Optics / Ocean Insight backend  (python-seabreeze).
+#   ThorlabsCCSModule     – Thorlabs CCS-series backend  (TLCCS_64.dll via ctypes).
+#
+# All backends are lazy-loaded: the third-party library is imported only inside
+# connect(), so the analysis side of the app never needs any spectrometer driver.
 
 import numpy as np
 import time
 import logging
+from abc import ABC, abstractmethod
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +89,103 @@ class DeviceCapabilities:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  SpectrometerBase — Abstract Base Class for all backends
+# ═══════════════════════════════════════════════════════════════════════
+
+class SpectrometerBase(ABC):
+    """
+    Abstract base class that every spectrometer backend must implement.
+    
+    The GUI (acquisition_app / acquisition_worker) depends **only** on this
+    interface, so adding a new brand is just a matter of subclassing and
+    implementing the abstract methods below.
+    """
+
+    # ─── Properties every backend must expose ──────────────────────────
+
+    @property
+    @abstractmethod
+    def is_connected(self) -> bool: ...
+
+    @property
+    @abstractmethod
+    def capabilities(self) -> DeviceCapabilities: ...
+
+    @property
+    @abstractmethod
+    def integration_time_us(self) -> int: ...
+
+    @property
+    @abstractmethod
+    def current_trigger_mode(self) -> int: ...
+
+    @property
+    @abstractmethod
+    def model(self) -> str: ...
+
+    @property
+    @abstractmethod
+    def serial_number(self) -> str: ...
+
+    # ─── Connection lifecycle ──────────────────────────────────────────
+
+    @abstractmethod
+    def connect(self, device_index: int = 0) -> str:
+        """Open the spectrometer.  Returns a status string."""
+        ...
+
+    @abstractmethod
+    def connect_simulated(self, profile_name: str = "Generic") -> str:
+        """Open a simulated spectrometer.  Returns a status string."""
+        ...
+
+    @abstractmethod
+    def disconnect(self) -> None: ...
+
+    # ─── Configuration ─────────────────────────────────────────────────
+
+    @abstractmethod
+    def set_integration_time(self, microseconds: int) -> None: ...
+
+    @abstractmethod
+    def set_trigger_mode(self, mode: int) -> None: ...
+
+    # ─── Data acquisition ──────────────────────────────────────────────
+
+    @abstractmethod
+    def get_wavelengths(self) -> np.ndarray: ...
+
+    @abstractmethod
+    def get_intensities(self, correct_dark_counts: bool = False,
+                         correct_nonlinearity: bool = False) -> np.ndarray: ...
+
+    def get_spectrum(self) -> tuple:
+        """Convenience — returns (wavelengths, intensities)."""
+        return self.get_wavelengths(), self.get_intensities()
+
+    # ─── Optional helpers ──────────────────────────────────────────────
+
+    def list_available_devices(self) -> list:
+        """Return [(model, serial, device_obj), …].  Override if the backend
+        supports device discovery."""
+        return []
+
+    def __enter__(self):
+        self.connect()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.disconnect()
+        return False
+
+    def __del__(self):
+        try:
+            self.disconnect()
+        except Exception:
+            pass
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  Simulated Spectrometer (for testing without hardware)
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -135,6 +230,27 @@ SIMULATION_PROFILES = {
         "int_min_us": 1_000,
         "int_max_us": 60_000_000,
         "trigger_modes": {"normal": 0, "external": 3},
+    },
+    # ── Thorlabs CCS profiles ────────────────────────────────────
+    "CCS175": {
+        "model": "CCS175-SIM",
+        "pixels": 3648,
+        "wl_min": 500.0,
+        "wl_max": 1000.0,
+        "max_intensity": 1.0,      # Thorlabs CCS returns normalised 0.0–1.0
+        "int_min_us": 10,
+        "int_max_us": 60_000_000,
+        "trigger_modes": {"normal": 0},  # CCS has no external HW trigger
+    },
+    "CCS200": {
+        "model": "CCS200-SIM",
+        "pixels": 3648,
+        "wl_min": 200.0,
+        "wl_max": 1000.0,
+        "max_intensity": 1.0,
+        "int_min_us": 10,
+        "int_max_us": 60_000_000,
+        "trigger_modes": {"normal": 0},
     },
 }
 
@@ -223,7 +339,13 @@ class _SimulatedSpectrometer:
         readout_noise = np.random.randn(self._pixels) * 8
         spectrum += shot_noise + readout_noise
 
-        spectrum = np.clip(spectrum, 0, self._max_intensity)
+        # Normalise to the device's dynamic range.
+        # The raw generation assumes a ~65 535 ADC scale; for devices with a
+        # different max_intensity (e.g. Thorlabs CCS uses 0.0–1.0) we
+        # rescale so the simulated data looks correct on the graph.
+        spectrum = np.clip(spectrum, 0, 65535)
+        if self._max_intensity != 65535:
+            spectrum = spectrum / 65535.0 * float(self._max_intensity)
         return spectrum
 
     def integration_time_micros(self, us):
@@ -303,20 +425,16 @@ def _build_trigger_map_from_seabreeze(spec) -> dict[str, int]:
 #  SpectrometerModule — main public interface
 # ═══════════════════════════════════════════════════════════════════════
 
-class SpectrometerModule:
+class SpectrometerModule(SpectrometerBase):
     """
-    Hardware abstraction layer for Ocean Optics spectrometers via python-seabreeze.
+    Ocean Optics / Ocean Insight backend via python-seabreeze.
     
     Model-agnostic:  all hardware-specific parameters (pixel count, trigger modes,
     integration-time limits, max intensity …) are queried from the device at connect-
     time and exposed through the ``capabilities`` property.
 
-    Supports any Ocean Optics / Ocean Insight spectrometer that python-seabreeze
-    recognises (USB2000, USB4000, HR4000, QEPro, HDX, Flame, Ocean ST, …).
-    
-    Architecture:
-        A future ``SpectrometerBase`` ABC can be extracted from this class so that
-        other brands (Avantes, Thorlabs, StellarNet …) can share the same GUI code.
+    Supports any spectrometer that python-seabreeze recognises (USB2000, USB4000,
+    HR4000, QEPro, HDX, Flame, Ocean ST, …).
     """
 
     def __init__(self):
@@ -713,15 +831,476 @@ class SpectrometerModule:
                 "Then run: seabreeze_os_setup  (for USB driver setup on Windows)"
             )
 
-    # ─── Context Manager ───────────────────────────────────────────────
 
-    def __enter__(self):
-        self.connect()
-        return self
+# ═══════════════════════════════════════════════════════════════════════
+#  Thorlabs CCS-series backend  (TLCCS_64.dll via ctypes)
+# ═══════════════════════════════════════════════════════════════════════
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.disconnect()
-        return False
+# Product-ID → model name mapping used for VISA resource strings and display
+_CCS_PRODUCT_IDS: dict[int, str] = {
+    0x8081: "CCS100",
+    0x8083: "CCS125",
+    0x8085: "CCS150",
+    0x8087: "CCS175",
+    0x8089: "CCS200",
+}
 
-    def __del__(self):
-        self.disconnect()
+# All CCS models have 3648 pixels
+_CCS_NUM_PIXELS = 3648
+
+# Status bit that indicates scan data is ready (from TLCCS.h)
+_TLCCS_STATUS_SCAN_TRANSFER = 0x0010
+
+
+class ThorlabsCCSModule(SpectrometerBase):
+    """
+    Thorlabs CCS-series spectrometer backend.
+    
+    All CCS models (CCS100/125/150/175/200) share the same 3648-pixel Toshiba
+    TCD1304 linear CCD and the same TLCCS DLL interface.
+    
+    The DLL is loaded lazily via ctypes; the user needs:
+      - ThorSpectra software installed (provides ``TLCCS_64.dll``)
+      - NI-VISA runtime (usually bundled with ThorSpectra)
+    
+    CCS specifics vs Ocean Optics:
+      - Intensity is normalised **0.0 – 1.0** (not raw ADC counts).
+      - Integration time is passed to the DLL in **seconds** (we convert from µs).
+      - No external hardware trigger is exposed in the DLL API.
+      - Scan is polled: call ``startScan`` then poll ``getDeviceStatus`` for the
+        data-ready bit before calling ``getScanData``.
+    """
+
+    # Integration time limits common to all CCS models
+    _INT_TIME_MIN_US = 10           # 10 µs  →  1e-5 s
+    _INT_TIME_MAX_US = 60_000_000   # 60 s
+
+    def __init__(self):
+        self._lib = None               # ctypes CDLL handle
+        self._handle = None            # ViSession integer
+        self._wavelengths: np.ndarray | None = None
+        self._capabilities = DeviceCapabilities()
+        self._integration_time_us: int = 100_000  # 100 ms default
+        self._current_trigger_mode: int = 0
+        self._simulated: bool = False
+        self._spec = None              # only used in simulation mode
+        self._model_name: str = "CCS"
+        self._serial: str = "N/A"
+
+    # ─── Properties ────────────────────────────────────────────────────
+
+    @property
+    def is_connected(self) -> bool:
+        if self._simulated:
+            return self._spec is not None and self._spec.is_open
+        return self._handle is not None
+
+    @property
+    def capabilities(self) -> DeviceCapabilities:
+        return self._capabilities
+
+    @property
+    def integration_time_us(self) -> int:
+        return self._integration_time_us
+
+    @property
+    def current_trigger_mode(self) -> int:
+        return self._current_trigger_mode
+
+    @property
+    def model(self) -> str:
+        return self._model_name if self.is_connected else "N/A"
+
+    @property
+    def serial_number(self) -> str:
+        return self._serial if self.is_connected else "N/A"
+
+    # ─── Connection ────────────────────────────────────────────────────
+
+    def connect(self, device_index: int = 0) -> str:
+        """Discover Thorlabs CCS spectrometers and open the one at *device_index*."""
+        self._simulated = False
+        try:
+            self._load_dll()
+        except SpectrometerError:
+            # DLL not installed → treat as "no device" so the GUI
+            # shows the friendly simulation-offer dialog.
+            raise NoDeviceError(
+                "No Thorlabs CCS spectrometer found.\n\n"
+                "The Thorlabs driver (TLCCS_64.dll) is not installed.\n"
+                "If you have a CCS spectrometer, install ThorSpectra from:\n"
+                "  https://www.thorlabs.com → Software → CCS"
+            )
+
+        devices = self.list_available_devices()
+        if not devices:
+            raise NoDeviceError(
+                "No Thorlabs CCS spectrometer found.\n\n"
+                "Check that:\n"
+                "  1. The CCS spectrometer is plugged in via USB\n"
+                "  2. ThorSpectra software is installed\n"
+                "  3. The READY LED on the device is green\n"
+                "  4. No other software is using the device"
+            )
+
+        if device_index >= len(devices):
+            raise SpectrometerError(
+                f"Device index {device_index} out of range — "
+                f"only {len(devices)} device(s) found."
+            )
+
+        _model, _serial, resource_name = devices[device_index]
+        return self._open_resource(resource_name)
+
+    def connect_with_resource(self, resource_name: str) -> str:
+        """
+        Open a CCS spectrometer using an explicit VISA resource string.
+        
+        Example::
+        
+            "USB0::0x1313::0x8087::M00123456::RAW"
+        """
+        self._simulated = False
+        self._load_dll()
+        return self._open_resource(resource_name)
+
+    def _open_resource(self, resource_name: str) -> str:
+        """Shared logic for opening a CCS device by VISA resource string."""
+        from ctypes import c_ulong, c_double, byref
+
+        handle = c_ulong(0)
+        err = self._lib.tlccs_init(
+            resource_name.encode() if isinstance(resource_name, str) else resource_name,
+            1,   # id_query
+            1,   # reset
+            byref(handle),
+        )
+        if err != 0:
+            raise SpectrometerError(
+                f"Failed to initialise CCS spectrometer.\n"
+                f"Resource: {resource_name}\n"
+                f"TLCCS error code: {err}\n\n"
+                "Check that the serial number and product ID are correct."
+            )
+
+        self._handle = handle.value
+
+        # Read wavelength array
+        wl_array = (c_double * _CCS_NUM_PIXELS)()
+        c_min = c_double(0)
+        c_max = c_double(0)
+        self._lib.tlccs_getWavelengthData(
+            self._handle, 0, wl_array, byref(c_min), byref(c_max)
+        )
+        self._wavelengths = np.array(wl_array[:], dtype=np.float64)
+
+        # Identify model from resource string
+        self._model_name = "CCS"
+        for pid, name in _CCS_PRODUCT_IDS.items():
+            pid_hex = f"0x{pid:04X}"
+            if pid_hex in resource_name.upper():
+                self._model_name = name
+                break
+
+        # Serial from resource string  (pattern …::M00123456::RAW)
+        self._serial = "N/A"
+        parts = resource_name.replace("'", "").split("::")
+        for part in parts:
+            if part.startswith("M") and part[1:].isdigit():
+                self._serial = part
+                break
+
+        # Set default integration time
+        int_sec = c_double(self._integration_time_us * 1e-6)
+        self._lib.tlccs_setIntegrationTime(self._handle, int_sec)
+
+        # ── Populate capabilities ──────────────────────────────────
+        caps = DeviceCapabilities()
+        caps.brand = "thorlabs"
+        caps.model = self._model_name
+        caps.serial_number = self._serial
+        caps.pixel_count = _CCS_NUM_PIXELS
+        caps.wavelength_min = round(float(self._wavelengths[0]), 1)
+        caps.wavelength_max = round(float(self._wavelengths[-1]), 1)
+        caps.max_intensity = 1.0   # normalised
+        caps.integration_time_min_us = self._INT_TIME_MIN_US
+        caps.integration_time_max_us = self._INT_TIME_MAX_US
+        caps.trigger_modes = {"normal": 0}   # no external trigger on CCS
+        caps.supports_dark_correction = False
+        caps.supports_nonlinearity_correction = False
+        self._capabilities = caps
+
+        # ── Verification read ──────────────────────────────────────
+        try:
+            test = self.get_intensities()
+            if len(test) != _CCS_NUM_PIXELS:
+                logger.warning(
+                    f"CCS verification: expected {_CCS_NUM_PIXELS} pixels, got {len(test)}"
+                )
+            else:
+                logger.info(f"CCS verification read OK: {_CCS_NUM_PIXELS} pixels")
+        except Exception as e:
+            self._close_handle()
+            raise SpectrometerError(
+                f"CCS opened but verification read failed:\n{e}"
+            )
+
+        # ── Build status string ────────────────────────────────────
+        status_lines = [
+            f"Connected: {caps.model} (S/N: {caps.serial_number})",
+            f"Pixels: {caps.pixel_count} | "
+            f"Range: {caps.wavelength_min}–{caps.wavelength_max} nm",
+            f"Integration: {caps.integration_time_min_us / 1000.0}–"
+            f"{caps.integration_time_max_us / 1000.0} ms",
+            f"Intensity: normalised 0.0–1.0",
+        ]
+        status = "\n".join(status_lines)
+        logger.info(status)
+        return status
+
+    def connect_simulated(self, profile_name: str = "CCS175") -> str:
+        """Open a simulated CCS spectrometer."""
+        profile = SIMULATION_PROFILES.get(profile_name, SIMULATION_PROFILES.get("CCS175"))
+        if profile is None:
+            profile = SIMULATION_PROFILES["Generic"]
+        self._spec = _SimulatedSpectrometer(profile)
+        self._wavelengths = self._spec.wavelengths()
+        self._integration_time_us = 100_000
+        self._current_trigger_mode = 0
+        self._simulated = True
+
+        caps = DeviceCapabilities()
+        caps.brand = "simulated"
+        caps.model = self._spec.model
+        caps.serial_number = self._spec.serial_number
+        caps.pixel_count = self._spec._pixels
+        caps.wavelength_min = round(self._spec._wl_min, 1)
+        caps.wavelength_max = round(self._spec._wl_max, 1)
+        caps.max_intensity = float(self._spec._max_intensity)
+        caps.integration_time_min_us = self._spec._int_min_us
+        caps.integration_time_max_us = self._spec._int_max_us
+        caps.trigger_modes = dict(self._spec._trigger_modes)
+        caps.supports_dark_correction = False
+        caps.supports_nonlinearity_correction = False
+        self._capabilities = caps
+        self._model_name = caps.model
+        self._serial = caps.serial_number
+
+        status_lines = [
+            f"Connected: {caps.model} (S/N: {caps.serial_number}) [SIMULATED]",
+            f"Pixels: {caps.pixel_count} | Range: {caps.wavelength_min}–{caps.wavelength_max} nm",
+            f"Integration: {caps.integration_time_min_us / 1000.0}–"
+            f"{caps.integration_time_max_us / 1000.0} ms",
+            f"Intensity: normalised 0.0–1.0",
+        ]
+        status = "\n".join(status_lines)
+        logger.info(status)
+        return status
+
+    def disconnect(self):
+        """Close the CCS spectrometer."""
+        if self._simulated and self._spec:
+            self._spec.close()
+            self._spec = None
+        elif self._handle is not None:
+            self._close_handle()
+
+        self._wavelengths = None
+        self._current_trigger_mode = 0
+        self._simulated = False
+        self._capabilities = DeviceCapabilities()
+        logger.info("CCS spectrometer disconnected.")
+
+    # ─── Configuration ─────────────────────────────────────────────────
+
+    def set_integration_time(self, microseconds: int):
+        if not self.is_connected:
+            raise SpectrometerError("CCS spectrometer not connected.")
+
+        microseconds = max(self._INT_TIME_MIN_US,
+                           min(microseconds, self._INT_TIME_MAX_US))
+
+        if self._simulated:
+            self._spec.integration_time_micros(microseconds)
+        else:
+            from ctypes import c_double
+            self._lib.tlccs_setIntegrationTime(
+                self._handle, c_double(microseconds * 1e-6)
+            )
+
+        self._integration_time_us = microseconds
+        logger.info(f"CCS integration time set to {microseconds} µs")
+
+    def set_trigger_mode(self, mode: int):
+        """CCS has no external trigger — only mode 0 (normal) is valid."""
+        if mode != 0:
+            raise ValueError(
+                f"Thorlabs CCS does not support trigger mode {mode}. "
+                "Only normal mode (0) is available."
+            )
+        self._current_trigger_mode = 0
+
+    # ─── Data Acquisition ──────────────────────────────────────────────
+
+    def get_wavelengths(self) -> np.ndarray:
+        if not self.is_connected:
+            raise SpectrometerError("CCS spectrometer not connected.")
+        return self._wavelengths.copy()
+
+    def get_intensities(self, correct_dark_counts: bool = False,
+                         correct_nonlinearity: bool = False) -> np.ndarray:
+        """
+        Acquire one spectrum from the CCS.
+        
+        Returns an array of 3648 doubles in the range 0.0–1.0.
+        ``correct_dark_counts`` and ``correct_nonlinearity`` are accepted
+        for interface compatibility but ignored (CCS DLL doesn't support them).
+        """
+        if not self.is_connected:
+            raise SpectrometerError("CCS spectrometer not connected.")
+
+        if self._simulated:
+            return self._spec.intensities()
+
+        from ctypes import c_double, c_int, byref
+
+        # Start scan
+        err = self._lib.tlccs_startScan(self._handle)
+        if err != 0:
+            raise SpectrometerError(f"CCS startScan failed (error {err})")
+
+        # Poll for data ready
+        status = c_int(0)
+        timeout_count = 0
+        max_polls = int(self._integration_time_us / 1000) + 5000  # generous timeout
+        while (status.value & _TLCCS_STATUS_SCAN_TRANSFER) == 0:
+            self._lib.tlccs_getDeviceStatus(self._handle, byref(status))
+            time.sleep(0.001)
+            timeout_count += 1
+            if timeout_count > max_polls:
+                raise SpectrometerError(
+                    "CCS scan timed out — no data received. "
+                    "Check integration time or device connection."
+                )
+
+        # Read scan data
+        data = (c_double * _CCS_NUM_PIXELS)()
+        err = self._lib.tlccs_getScanData(self._handle, data)
+        if err != 0:
+            raise SpectrometerError(f"CCS getScanData failed (error {err})")
+
+        return np.array(data[:], dtype=np.float64)
+
+    # ─── Device discovery ──────────────────────────────────────────────
+
+    def list_available_devices(self) -> list:
+        """
+        Scan for connected CCS spectrometers using NI-VISA resource manager.
+        
+        Returns a list of (model_name, serial_number, resource_string) tuples.
+        """
+        self._load_dll()
+
+        try:
+            import ctypes
+            from ctypes import c_ulong, byref, create_string_buffer
+
+            # Try loading NI-VISA to enumerate USB resources
+            try:
+                visa_lib = ctypes.cdll.LoadLibrary("visa64.dll")
+            except OSError:
+                try:
+                    visa_lib = ctypes.cdll.LoadLibrary("visa32.dll")
+                except OSError:
+                    logger.warning("NI-VISA not found — cannot auto-discover CCS devices.")
+                    return []
+
+            rm = c_ulong(0)
+            err = visa_lib.viOpenDefaultRM(byref(rm))
+            if err != 0:
+                return []
+
+            found = []
+            for pid, model_name in _CCS_PRODUCT_IDS.items():
+                pattern = f"USB0::0x1313::0x{pid:04X}::?*::RAW".encode()
+                find_list = c_ulong(0)
+                count = c_ulong(0)
+                rsc = create_string_buffer(512)
+
+                err = visa_lib.viFindRsrc(rm, pattern, byref(find_list), byref(count), rsc)
+                if err == 0 and count.value > 0:
+                    resource_str = rsc.value.decode()
+                    serial = "N/A"
+                    parts = resource_str.split("::")
+                    for part in parts:
+                        if part.startswith("M") and len(part) > 1:
+                            serial = part
+                            break
+                    found.append((model_name, serial, resource_str))
+
+                    # If more than one of same model
+                    for _ in range(count.value - 1):
+                        err2 = visa_lib.viFindNext(find_list, rsc)
+                        if err2 == 0:
+                            resource_str = rsc.value.decode()
+                            serial = "N/A"
+                            parts = resource_str.split("::")
+                            for part in parts:
+                                if part.startswith("M") and len(part) > 1:
+                                    serial = part
+                                    break
+                            found.append((model_name, serial, resource_str))
+
+                    visa_lib.viClose(find_list)
+
+            visa_lib.viClose(rm)
+            return found
+
+        except Exception as e:
+            logger.debug(f"CCS device discovery failed: {e}")
+            return []
+
+    # ─── Internal helpers ──────────────────────────────────────────────
+
+    def _load_dll(self):
+        """Load the TLCCS_64.dll if not already loaded."""
+        if self._lib is not None:
+            return
+        import ctypes
+        import os as _os
+
+        # Common install locations
+        search_paths = [
+            r"C:\Program Files\IVI Foundation\VISA\Win64\Bin\TLCCS_64.dll",
+            r"C:\Program Files (x86)\IVI Foundation\VISA\Win64\Bin\TLCCS_64.dll",
+        ]
+        for path in search_paths:
+            if _os.path.isfile(path):
+                try:
+                    self._lib = ctypes.cdll.LoadLibrary(path)
+                    logger.info(f"Loaded TLCCS DLL from {path}")
+                    return
+                except OSError as e:
+                    logger.debug(f"Failed to load {path}: {e}")
+
+        # Fallback: let ctypes search in system PATH
+        try:
+            self._lib = ctypes.cdll.LoadLibrary("TLCCS_64.dll")
+            logger.info("Loaded TLCCS_64.dll from system PATH")
+        except OSError:
+            raise SpectrometerError(
+                "Thorlabs TLCCS_64.dll not found.\n\n"
+                "Install ThorSpectra from:\n"
+                "  https://www.thorlabs.com/software_pages/ViewSoftwarePage.cfm?Code=CCS\n\n"
+                "The DLL is expected at:\n"
+                "  C:\\Program Files\\IVI Foundation\\VISA\\Win64\\Bin\\TLCCS_64.dll"
+            )
+
+    def _close_handle(self):
+        """Close the DLL session handle."""
+        if self._lib is not None and self._handle is not None:
+            try:
+                self._lib.tlccs_close(self._handle)
+            except Exception as e:
+                logger.warning(f"Error closing CCS handle: {e}")
+            self._handle = None

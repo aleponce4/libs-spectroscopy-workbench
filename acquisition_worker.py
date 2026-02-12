@@ -51,7 +51,8 @@ class AcquisitionWorker(threading.Thread):
     def __init__(self, spectrometer_module):
         """
         Args:
-            spectrometer_module: A connected SpectrometerModule instance.
+            spectrometer_module: A connected SpectrometerBase instance
+                (SpectrometerModule for Ocean Optics, ThorlabsCCSModule for Thorlabs).
         """
         super().__init__(daemon=True, name="AcquisitionWorker")
         self.spec = spectrometer_module

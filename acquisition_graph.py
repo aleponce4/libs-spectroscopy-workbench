@@ -95,6 +95,12 @@ def configure_graph_for_device(ax, canvas, line, capabilities):
     ax.set_xlim([wl_min, wl_max])
     ax.set_ylim([0, max_int])
 
+    # Adapt Y-axis label to the device's intensity scale
+    if max_int <= 1.0:
+        ax.set_ylabel("Intensity (normalised)")
+    else:
+        ax.set_ylabel("Intensity (counts)")
+
     # Store device max so the hysteresis auto-scaler knows the floor
     ax._device_max_intensity = max_int
 
