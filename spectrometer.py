@@ -146,7 +146,16 @@ class SpectrometerModule:
     @property
     def is_connected(self) -> bool:
         """Check if a spectrometer is currently connected and open."""
-        return self._spec is not None and self._spec.is_open
+        if self._spec is None:
+            return False
+        # Simulated spectrometer has .is_open directly
+        if hasattr(self._spec, 'is_open'):
+            return self._spec.is_open
+        # Real seabreeze Spectrometer: is_open lives on the underlying device
+        try:
+            return self._spec._dev.is_open
+        except (AttributeError, Exception):
+            return self._spec is not None
 
     @property
     def integration_time_us(self) -> int:

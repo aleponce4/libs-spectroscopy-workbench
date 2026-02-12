@@ -82,9 +82,11 @@ echo Creating GitHub release...
 echo ================================
 
 :: Create release notes
-set release_notes=- Added prominence filter for better peak detection^
+set release_notes=- Added Acquisition Mode with USB4000 spectrometer support^
 
-- Added laser removal feature (532.63 nm)^
+- Fixed spectrometer is_open attribute for real hardware connection^
+
+- Added simulation mode for testing without hardware^
 
 - Improved spectral analysis capabilities
 
