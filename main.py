@@ -58,6 +58,13 @@ def main():
 
         # Check if there's data to hand off to Analysis mode
         handoff = acq_app.get_handoff_data()
+
+        # Destroy the acquisition window now (after mainloop exited)
+        # so the Tcl interpreter is freed before creating a new Tk root.
+        try:
+            acq_app.root.destroy()
+        except Exception:
+            pass
         if handoff is not None:
             from libs_app import App
             import pandas as pd

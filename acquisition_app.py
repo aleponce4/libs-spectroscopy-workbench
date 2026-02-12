@@ -291,7 +291,7 @@ class AcquisitionApp:
                 "wavelengths": self.current_wavelengths.copy(),
                 "intensities": self.current_intensities.copy()
             }
-            self._cleanup_and_close()
+            self._cleanup_and_quit()
 
     # ═══════════════════════════════════════════════════════════════════
     #  Message Queue Polling (thread-safe GUI updates)
@@ -386,8 +386,22 @@ class AcquisitionApp:
         """Return any spectrum data that should be passed to Analysis mode."""
         return self._handoff_data
 
+    def _cleanup_and_quit(self):
+        """Stop the worker, disconnect the spectrometer, and exit mainloop.
+        Uses quit() instead of destroy() so that a new Tk root can be created
+        afterwards (for the Analysis mode handoff)."""
+        if self.worker:
+            self.worker.stop()
+            self.worker = None
+
+        if self.spectrometer:
+            self.spectrometer.disconnect()
+            self.spectrometer = None
+
+        self.root.quit()
+
     def _cleanup_and_close(self):
-        """Stop the worker, disconnect the spectrometer, and close the window."""
+        """Stop the worker, disconnect the spectrometer, and destroy the window."""
         if self.worker:
             self.worker.stop()
             self.worker = None

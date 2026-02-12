@@ -45,9 +45,9 @@ def create_acquisition_graph(parent_frame):
     fig, ax = plt.subplots(figsize=(14, 8))
     fig.subplots_adjust(left=0.1)
 
-    # Default axis setup (USB4000 range is ~200–1100 nm)
+    # Default axis setup (USB4000 range is ~200–1100 nm, 16-bit ADC → max 65535)
     ax.set_xlim([200, 1000])
-    ax.set_ylim([0, 4096])  # USB4000 is 16-bit but typical range
+    ax.set_ylim([0, 65535])
     ax.set_xlabel("Wavelength (nm)")
     ax.set_ylabel("Intensity (counts)")
     ax.set_title("Live Spectrum")
@@ -73,9 +73,10 @@ def create_acquisition_graph(parent_frame):
     return graph_frame, fig, ax, canvas, line
 
 
-def update_spectrum_fast(ax, canvas, line, wavelengths, intensities, auto_scale_y=True):
+def update_spectrum_fast(ax, canvas, line, wavelengths, intensities):
     """
     Fast spectrum update — changes only the line data without clearing the axes.
+    Y axis is fixed to the spectrometer max (65535) to avoid constant rescaling.
     
     Args:
         ax: Matplotlib Axes
@@ -83,7 +84,6 @@ def update_spectrum_fast(ax, canvas, line, wavelengths, intensities, auto_scale_
         line: The Line2D object created by create_acquisition_graph
         wavelengths: np.ndarray of wavelength values
         intensities: np.ndarray of intensity values
-        auto_scale_y: If True, auto-scale the Y axis to fit the data
     """
     line.set_xdata(wavelengths)
     line.set_ydata(intensities)
@@ -91,11 +91,6 @@ def update_spectrum_fast(ax, canvas, line, wavelengths, intensities, auto_scale_
     # Update X limits to match actual data range
     if len(wavelengths) > 0:
         ax.set_xlim([wavelengths[0], wavelengths[-1]])
-
-    if auto_scale_y and len(intensities) > 0:
-        y_max = np.max(intensities)
-        if y_max > 0:
-            ax.set_ylim([0, y_max * 1.05])
 
     canvas.draw_idle()
 
