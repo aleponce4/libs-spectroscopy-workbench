@@ -56,11 +56,19 @@ def create_acquisition_sidebar(app):
     )
     app.disconnect_btn.grid(row=1, column=0, padx=5, pady=3, sticky="ew")
 
+    # Diagnose button
+    app.diagnose_btn = ttk.Button(
+        conn_frame, text="Diagnose…",
+        compound='left', style="LeftAligned.TButton", width=18,
+        command=app.on_diagnose,
+    )
+    app.diagnose_btn.grid(row=2, column=0, padx=5, pady=3, sticky="ew")
+
     # Status indicator
     app.connection_status_var = tk.StringVar(value="Disconnected")
     status_label = ttk.Label(conn_frame, textvariable=app.connection_status_var,
                              style="Status.TLabel", foreground="gray")
-    status_label.grid(row=2, column=0, padx=5, pady=(2, 5), sticky="w")
+    status_label.grid(row=3, column=0, padx=5, pady=(2, 5), sticky="w")
 
     # ─── Acquisition Controls ──────────────────────────────────────────
     acq_frame = ttk.LabelFrame(app.sidebar_frame, text="Acquisition", padding=5)

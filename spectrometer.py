@@ -11,9 +11,135 @@
 import numpy as np
 import time
 import logging
+import subprocess
+import json
+import re
 from abc import ABC, abstractmethod
 
 logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  USB bus scanner (Windows – PowerShell based, zero external deps)
+# ═══════════════════════════════════════════════════════════════════════
+
+# Known USB vendor IDs for supported spectrometer brands
+_OCEAN_OPTICS_VID = "2457"   # 0x2457
+_THORLABS_VID     = "1313"   # 0x1313
+
+
+def scan_usb_spectrometers() -> list[dict]:
+    """
+    Query the Windows USB bus for spectrometer-class devices.
+
+    Returns a list of dicts, each containing::
+
+        {
+            "vid": "2457",
+            "pid": "1022",
+            "description": "USB4000 Ocean Optics",
+            "driver": "WinUSB" | "libusb-win32" | "libusbK" | …,
+            "status": "OK" | "Error" | …,
+            "instance_id": "USB\\VID_2457&PID_1022\\...",
+            "brand": "ocean_optics" | "thorlabs" | "unknown",
+        }
+
+    Falls back gracefully to an empty list if PowerShell is unavailable.
+    """
+    target_vids = {_OCEAN_OPTICS_VID, _THORLABS_VID}
+
+    # PowerShell command: list PnP devices whose InstanceId contains a target VID
+    # We fetch all USB devices and filter in Python for simplicity.
+    ps_script = (
+        "Get-PnpDevice -Class USB,HIDClass,Ports,USBDevice -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.InstanceId -match 'USB\\\\VID_' } | "
+        "Select-Object InstanceId, FriendlyName, Status, "
+        "@{N='Driver';E={(Get-PnpDeviceProperty -InstanceId $_.InstanceId "
+        "-KeyName 'DEVPKEY_Device_DriverDesc' -ErrorAction SilentlyContinue).Data}} | "
+        "ConvertTo-Json -Compress"
+    )
+
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_script],
+            capture_output=True, text=True, timeout=10,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            logger.debug(f"USB scan returned no data (rc={result.returncode})")
+            return []
+
+        raw = result.stdout.strip()
+        # PowerShell returns a single object (not array) when only one match
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            data = [data]
+
+    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError) as e:
+        logger.debug(f"USB scan failed: {e}")
+        return []
+
+    devices = []
+    for entry in data:
+        iid = entry.get("InstanceId", "")
+        vid_match = re.search(r"VID_(\w{4})", iid, re.IGNORECASE)
+        pid_match = re.search(r"PID_(\w{4})", iid, re.IGNORECASE)
+        if not vid_match:
+            continue
+        vid = vid_match.group(1).upper()
+        pid = pid_match.group(1).upper() if pid_match else "????"
+
+        if vid not in {v.upper() for v in target_vids}:
+            continue
+
+        brand = "unknown"
+        if vid == _OCEAN_OPTICS_VID.upper():
+            brand = "ocean_optics"
+        elif vid == _THORLABS_VID.upper():
+            brand = "thorlabs"
+
+        devices.append({
+            "vid": vid,
+            "pid": pid,
+            "description": entry.get("FriendlyName") or "Unknown device",
+            "driver": entry.get("Driver") or "(no driver)",
+            "status": entry.get("Status") or "Unknown",
+            "instance_id": iid,
+            "brand": brand,
+        })
+
+    return devices
+
+
+def _driver_ok_for_backend(driver_name: str, backend: str) -> tuple[bool, str]:
+    """
+    Check whether a USB driver name is compatible with the given seabreeze
+    backend ('cseabreeze' or 'pyseabreeze').
+
+    Returns (is_ok, advice_string).
+    """
+    d = (driver_name or "").lower()
+    if backend == "cseabreeze":
+        if "winusb" in d:
+            return True, ""
+        if "libusb" in d or "libusbk" in d:
+            return False, (
+                "cseabreeze needs WinUSB driver.\n"
+                "Run:  seabreeze_os_setup  (from an admin terminal) "
+                "to switch the driver."
+            )
+        return False, f"Unknown driver '{driver_name}' — may need WinUSB for cseabreeze."
+    elif backend == "pyseabreeze":
+        if "libusb" in d or "libusbk" in d:
+            return True, ""
+        if "winusb" in d:
+            return False, (
+                "pyseabreeze needs libusb/libusbK driver.\n"
+                "Install libusb-win32 via Zadig (https://zadig.akeo.ie) "
+                "or switch to cseabreeze backend."
+            )
+        return False, f"Unknown driver '{driver_name}' — may need libusb for pyseabreeze."
+    return True, ""
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -169,6 +295,12 @@ class SpectrometerBase(ABC):
         """Return [(model, serial, device_obj), …].  Override if the backend
         supports device discovery."""
         return []
+
+    @classmethod
+    def diagnose(cls) -> dict:
+        """Run diagnostics and return a structured report.
+        Override in subclasses.  Default returns empty report."""
+        return {"backend": cls.__name__, "notes": [], "devices": []}
 
     def __enter__(self):
         self.connect()
@@ -811,6 +943,137 @@ class SpectrometerModule(SpectrometerBase):
 
     # ─── Internal helpers ──────────────────────────────────────────────
 
+    @classmethod
+    def diagnose(cls) -> dict:
+        """
+        Run a comprehensive diagnostic scan for Ocean Optics spectrometers.
+
+        Returns a dict with::
+
+            {
+                "backend": "SpectrometerModule",
+                "seabreeze_installed": bool,
+                "seabreeze_backend": "cseabreeze" | "pyseabreeze" | None,
+                "seabreeze_backend_fail_reason": str | None,
+                "usb_devices": [...],          # from Windows USB bus scan
+                "seabreeze_devices": [...],     # from list_devices()
+                "per_device_errors": {...},      # serial → error string
+                "driver_warnings": [...],       # per-device driver advice
+                "notes": [str, ...],
+            }
+        """
+        report: dict = {
+            "backend": "SpectrometerModule",
+            "seabreeze_installed": False,
+            "seabreeze_backend": None,
+            "seabreeze_backend_fail_reason": None,
+            "usb_devices": [],
+            "seabreeze_devices": [],
+            "per_device_errors": {},
+            "driver_warnings": [],
+            "notes": [],
+        }
+
+        # 1. USB bus scan
+        try:
+            all_usb = scan_usb_spectrometers()
+            report["usb_devices"] = [
+                d for d in all_usb if d["brand"] == "ocean_optics"
+            ]
+        except Exception as e:
+            report["notes"].append(f"USB bus scan error: {e}")
+
+        # 2. Import seabreeze
+        try:
+            import seabreeze
+            report["seabreeze_installed"] = True
+        except ImportError:
+            report["notes"].append(
+                "python-seabreeze is NOT installed.\n"
+                "Install with: pip install seabreeze"
+            )
+            return report
+
+        # 3. Try cseabreeze, then pyseabreeze
+        sb_backend = None
+        c_fail = None
+        py_fail = None
+        try:
+            seabreeze.use("cseabreeze")
+            sb_backend = "cseabreeze"
+        except Exception as e:
+            c_fail = str(e)
+            try:
+                seabreeze.use("pyseabreeze")
+                sb_backend = "pyseabreeze"
+            except Exception as e2:
+                py_fail = str(e2)
+
+        report["seabreeze_backend"] = sb_backend
+        if sb_backend is None:
+            report["seabreeze_backend_fail_reason"] = (
+                f"cseabreeze: {c_fail}\npyseabreeze: {py_fail}"
+            )
+            report["notes"].append("Neither seabreeze backend could be loaded.")
+            return report
+        elif c_fail:
+            report["seabreeze_backend_fail_reason"] = (
+                f"cseabreeze failed ({c_fail}), fell back to pyseabreeze"
+            )
+
+        # 4. Enumerate devices via seabreeze
+        from seabreeze.spectrometers import list_devices, Spectrometer
+
+        try:
+            raw_devices = list_devices()
+        except Exception as e:
+            report["notes"].append(f"list_devices() error: {e}")
+            raw_devices = []
+
+        for i, dev in enumerate(raw_devices):
+            try:
+                m = dev.model
+                s = dev.serial_number
+            except Exception:
+                m, s = "Unknown", f"device_{i}"
+            report["seabreeze_devices"].append({
+                "index": i, "model": m, "serial": s,
+            })
+
+            # 5. Try opening each device to find per-device errors
+            try:
+                test_spec = Spectrometer(dev)
+                test_spec.close()
+            except Exception as e:
+                report["per_device_errors"][s] = str(e)
+
+        # 6. Cross-reference USB bus vs seabreeze driver compatibility
+        if sb_backend and report["usb_devices"]:
+            for usb_dev in report["usb_devices"]:
+                ok, advice = _driver_ok_for_backend(
+                    usb_dev["driver"], sb_backend
+                )
+                if not ok:
+                    report["driver_warnings"].append({
+                        "device": usb_dev["description"],
+                        "instance_id": usb_dev["instance_id"],
+                        "current_driver": usb_dev["driver"],
+                        "needed_backend": sb_backend,
+                        "advice": advice,
+                    })
+
+        # Summary note if USB devices found but seabreeze sees fewer
+        n_usb = len(report["usb_devices"])
+        n_sb = len(report["seabreeze_devices"])
+        if n_usb > 0 and n_sb < n_usb:
+            report["notes"].append(
+                f"Windows sees {n_usb} Ocean Optics USB device(s), "
+                f"but seabreeze only recognises {n_sb}.\n"
+                "The missing device(s) likely have the wrong USB driver bound."
+            )
+
+        return report
+
     def _lazy_import_seabreeze(self):
         """Import seabreeze once and stash the module reference."""
         if self._sb is not None:
@@ -1295,6 +1558,142 @@ class ThorlabsCCSModule(SpectrometerBase):
                 "The DLL is expected at:\n"
                 "  C:\\Program Files\\IVI Foundation\\VISA\\Win64\\Bin\\TLCCS_64.dll"
             )
+
+    @classmethod
+    def diagnose(cls) -> dict:
+        """
+        Run a comprehensive diagnostic scan for Thorlabs CCS spectrometers.
+
+        Returns a dict with::
+
+            {
+                "backend": "ThorlabsCCSModule",
+                "dll_found": bool,
+                "dll_path": str | None,
+                "visa_installed": bool,
+                "visa_resources": [...],
+                "usb_devices": [...],
+                "notes": [str, ...],
+            }
+        """
+        import os as _os
+
+        report: dict = {
+            "backend": "ThorlabsCCSModule",
+            "dll_found": False,
+            "dll_path": None,
+            "visa_installed": False,
+            "visa_resources": [],
+            "usb_devices": [],
+            "notes": [],
+        }
+
+        # 1. USB bus scan for Thorlabs VID
+        try:
+            all_usb = scan_usb_spectrometers()
+            report["usb_devices"] = [
+                d for d in all_usb if d["brand"] == "thorlabs"
+            ]
+        except Exception as e:
+            report["notes"].append(f"USB bus scan error: {e}")
+
+        # 2. Check DLL
+        search_paths = [
+            r"C:\Program Files\IVI Foundation\VISA\Win64\Bin\TLCCS_64.dll",
+            r"C:\Program Files (x86)\IVI Foundation\VISA\Win64\Bin\TLCCS_64.dll",
+        ]
+        for path in search_paths:
+            if _os.path.isfile(path):
+                report["dll_found"] = True
+                report["dll_path"] = path
+                break
+
+        if not report["dll_found"]:
+            # Try system PATH
+            import shutil
+            found = shutil.which("TLCCS_64.dll")
+            if found:
+                report["dll_found"] = True
+                report["dll_path"] = found
+
+        if not report["dll_found"]:
+            report["notes"].append(
+                "TLCCS_64.dll not found.\n"
+                "Install ThorSpectra from thorlabs.com to get the driver DLL."
+            )
+
+        # 3. Check NI-VISA and enumerate resources
+        try:
+            import ctypes
+            from ctypes import c_ulong, byref, create_string_buffer
+
+            visa_lib = None
+            for dll_name in ("visa64.dll", "visa32.dll"):
+                try:
+                    visa_lib = ctypes.cdll.LoadLibrary(dll_name)
+                    break
+                except OSError:
+                    continue
+
+            if visa_lib is None:
+                report["notes"].append(
+                    "NI-VISA runtime not found (visa64.dll / visa32.dll).\n"
+                    "NI-VISA is required to communicate with Thorlabs CCS devices.\n"
+                    "It is usually bundled with ThorSpectra."
+                )
+            else:
+                report["visa_installed"] = True
+                rm = c_ulong(0)
+                err = visa_lib.viOpenDefaultRM(byref(rm))
+                if err == 0:
+                    for pid, model_name in _CCS_PRODUCT_IDS.items():
+                        pattern = f"USB0::0x1313::0x{pid:04X}::?*::RAW".encode()
+                        find_list = c_ulong(0)
+                        count = c_ulong(0)
+                        rsc = create_string_buffer(512)
+                        err2 = visa_lib.viFindRsrc(
+                            rm, pattern, byref(find_list), byref(count), rsc
+                        )
+                        if err2 == 0 and count.value > 0:
+                            resource_str = rsc.value.decode()
+                            report["visa_resources"].append({
+                                "model": model_name,
+                                "resource": resource_str,
+                            })
+                            for _ in range(count.value - 1):
+                                if visa_lib.viFindNext(find_list, rsc) == 0:
+                                    report["visa_resources"].append({
+                                        "model": model_name,
+                                        "resource": rsc.value.decode(),
+                                    })
+                            visa_lib.viClose(find_list)
+                    visa_lib.viClose(rm)
+
+                    if not report["visa_resources"]:
+                        report["notes"].append(
+                            "NI-VISA is installed but found no CCS VISA resources.\n"
+                            "Check that the CCS is plugged in and ThorSpectra can see it."
+                        )
+                else:
+                    report["notes"].append(
+                        f"viOpenDefaultRM failed (error {err}). NI-VISA may be corrupt."
+                    )
+
+        except Exception as e:
+            report["notes"].append(f"VISA diagnostic error: {e}")
+
+        # 4. Summary
+        n_usb = len(report["usb_devices"])
+        n_visa = len(report["visa_resources"])
+        if n_usb > 0 and n_visa == 0:
+            report["notes"].append(
+                f"Windows sees {n_usb} Thorlabs USB device(s) on the bus, "
+                "but VISA cannot find them.\n"
+                "This usually means the VISA/ThorSpectra driver is not installed "
+                "or the device needs to be power-cycled."
+            )
+
+        return report
 
     def _close_handle(self):
         """Close the DLL session handle."""

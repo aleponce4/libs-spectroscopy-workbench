@@ -81,62 +81,108 @@ class AcquisitionApp:
     # ═══════════════════════════════════════════════════════════════════
 
     def on_connect(self):
-        """Connect to the spectrometer — asks the user which brand first."""
+        """Connect to the spectrometer — asks the user which brand first,
+        or opens diagnostics on failure."""
         from spectrometer import (
             SpectrometerModule, ThorlabsCCSModule,
             SpectrometerError, NoDeviceError,
         )
 
-        # ── Brand selection dialog ─────────────────────────────────────
+        # ── Brand selection dialog ─────────────────────────────────────────
         brand = self._ask_brand()
         if brand is None:
             return  # user cancelled
 
         if brand == "ocean_optics":
             self.spectrometer = SpectrometerModule()
-            sim_profile = None  # auto-detect (Generic / USB4000 / etc.)
+            sim_profile = None
         elif brand == "thorlabs":
             self.spectrometer = ThorlabsCCSModule()
             sim_profile = "CCS175"
         else:
-            # Simulation-only shortcut
             self.spectrometer = SpectrometerModule()
             sim_profile = None
 
         try:
             status = self.spectrometer.connect()
-        except NoDeviceError:
-            # No hardware found — offer simulation mode
-            result = messagebox.askyesno(
-                "No Spectrometer Found",
-                "No spectrometer hardware was detected.\n\n"
-                "Would you like to use Simulation Mode?\n"
-                "(Generates synthetic LIBS spectra for testing)"
-            )
-            if result:
-                status = self.spectrometer.connect_simulated(
-                    sim_profile) if sim_profile else self.spectrometer.connect_simulated()
-            else:
-                self.spectrometer = None
-                return
-        except SpectrometerError as e:
-            # Driver not installed — offer simulation directly
-            result = messagebox.askyesno(
-                "Connection Error",
-                f"{e}\n\n"
-                "Would you like to use Simulation Mode instead?"
-            )
-            if result:
-                status = self.spectrometer.connect_simulated(
-                    sim_profile) if sim_profile else self.spectrometer.connect_simulated()
-            else:
-                self.spectrometer = None
-                return
-        except Exception as e:
-            messagebox.showerror("Error", f"Unexpected error:\n{e}")
+        except (NoDeviceError, SpectrometerError) as e:
+            # ── Open diagnostic dialog instead of dumb yes/no ───────────
             self.spectrometer = None
+            result = self._open_diagnostic_dialog(auto_reason=str(e))
+            if result is None:
+                return
+            self._handle_diagnostic_result(result)
+            return
+        except Exception as e:
+            self.spectrometer = None
+            result = self._open_diagnostic_dialog(
+                auto_reason=f"Unexpected error: {e}"
+            )
+            if result is None:
+                return
+            self._handle_diagnostic_result(result)
             return
 
+        # ── Normal success path ─────────────────────────────────────────
+        self._finish_connection(status)
+
+    def _open_diagnostic_dialog(self, auto_reason: str | None = None):
+        """Show the diagnostic + device picker dialog.
+        Returns the dialog result dict, or None if cancelled."""
+        from diagnostic_dialog import DiagnosticDialog
+        dlg = DiagnosticDialog(self.root, auto_reason=auto_reason)
+        return dlg.result
+
+    def _handle_diagnostic_result(self, result: dict):
+        """Process the result from the diagnostic dialog."""
+        from spectrometer import (
+            SpectrometerModule, ThorlabsCCSModule,
+            SpectrometerError,
+        )
+
+        action = result.get("action")
+        brand = result.get("brand", "ocean_optics")
+
+        if action == "simulate":
+            if brand == "thorlabs":
+                self.spectrometer = ThorlabsCCSModule()
+                status = self.spectrometer.connect_simulated("CCS175")
+            else:
+                self.spectrometer = SpectrometerModule()
+                status = self.spectrometer.connect_simulated()
+            self._finish_connection(status)
+
+        elif action == "connect":
+            device_index = result.get("device_index", 0)
+            if brand == "thorlabs":
+                self.spectrometer = ThorlabsCCSModule()
+            else:
+                self.spectrometer = SpectrometerModule()
+            try:
+                status = self.spectrometer.connect(device_index=device_index)
+                self._finish_connection(status)
+            except Exception as e:
+                messagebox.showerror(
+                    "Connection Failed",
+                    f"Could not connect to device {device_index}:\n{e}",
+                )
+                self.spectrometer = None
+
+        elif action == "connect_resource":
+            resource = result.get("resource", "")
+            self.spectrometer = ThorlabsCCSModule()
+            try:
+                status = self.spectrometer.connect_with_resource(resource)
+                self._finish_connection(status)
+            except Exception as e:
+                messagebox.showerror(
+                    "Connection Failed",
+                    f"Could not connect to VISA resource:\n{resource}\n\n{e}",
+                )
+                self.spectrometer = None
+
+    def _finish_connection(self, status: str):
+        """Common post-connection setup (UI configuration, worker start)."""
         self.connection_status_var.set(status)
         self.status_message_var.set("Connected successfully.")
 
@@ -185,6 +231,15 @@ class AcquisitionApp:
 
         # Start polling the message queue
         self._poll_queue()
+
+    def on_diagnose(self):
+        """Open the diagnostic dialog on demand (sidebar button)."""
+        result = self._open_diagnostic_dialog()
+        if result is not None:
+            # If already connected, disconnect first
+            if self.spectrometer and self.spectrometer.is_connected:
+                self.on_disconnect()
+            self._handle_diagnostic_result(result)
 
     def on_disconnect(self):
         """Disconnect from the spectrometer."""
