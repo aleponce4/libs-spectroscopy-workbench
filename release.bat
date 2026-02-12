@@ -82,13 +82,15 @@ echo Creating GitHub release...
 echo ================================
 
 :: Create release notes
-set release_notes=- Added Acquisition Mode with USB4000 spectrometer support^
+set release_notes=- Model-agnostic spectrometer support (any Ocean Optics model)^
 
-- Fixed spectrometer is_open attribute for real hardware connection^
+- Dynamic device capabilities detection (pixels, trigger modes, integration limits)^
 
-- Added simulation mode for testing without hardware^
+- Simulation profiles for USB4000, QEPro, HDX, and Generic^
 
-- Improved spectral analysis capabilities
+- UI adapts dynamically to connected device capabilities^
+
+- Architecture prepared for future multi-brand support
 
 gh release create %version% --title "LIBS Data Analysis %version%" --notes "%release_notes%" %exe_path%
 

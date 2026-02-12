@@ -21,7 +21,7 @@ class AcquisitionApp:
     Acquisition Mode application.
     
     Provides:
-        - USB4000 spectrometer connection (via SpectrometerModule)
+        - Spectrometer connection via SpectrometerModule (any Ocean Optics model)
         - Live spectrum preview (continuous polling)
         - Hardware-triggered single-shot capture (external edge trigger)
         - Auto-save of captured spectra
@@ -120,13 +120,40 @@ class AcquisitionApp:
         self.connection_status_var.set(status)
         self.status_message_var.set("Connected successfully.")
 
+        # ── Configure UI for the connected device's capabilities ───
+        caps = self.spectrometer.capabilities
+
+        # Graph axis limits and placeholder
+        from acquisition_graph import configure_graph_for_device
+        configure_graph_for_device(self.ax, self.canvas, self.live_line, caps)
+
+        # Integration time range hint
+        int_min_ms = caps.integration_time_min_us / 1000.0
+        int_max_ms = caps.integration_time_max_us / 1000.0
+        self.int_range_var.set(f"Range: {int_min_ms:.2f}–{int_max_ms:.0f} ms")
+
+        # Enable/disable correction checkboxes based on device support
+        if hasattr(self, 'dark_check'):
+            self.dark_check.config(
+                state="normal" if caps.supports_dark_correction else "disabled"
+            )
+        if hasattr(self, 'nl_check'):
+            self.nl_check.config(
+                state="normal" if caps.supports_nonlinearity_correction else "disabled"
+            )
+
         # Enable buttons
         self.connect_btn.config(state="disabled")
         self.disconnect_btn.config(state="normal")
         self.live_btn.config(state="normal")
-        self.arm_btn.config(state="normal")
         self.test_trigger_btn.config(state="normal")
         self.apply_int_btn.config(state="normal")
+
+        # Arm Trigger button: only enable if the device supports external trigger
+        if caps.has_external_trigger:
+            self.arm_btn.config(state="normal")
+        else:
+            self.arm_btn.config(state="disabled")
 
         # Start the worker thread
         from acquisition_worker import AcquisitionWorker
@@ -161,6 +188,16 @@ class AcquisitionApp:
         self.test_trigger_btn.config(state="disabled")
         self.stop_btn.config(state="disabled")
         self.apply_int_btn.config(state="disabled")
+
+        # Reset device-specific UI hints
+        if hasattr(self, 'int_range_var'):
+            self.int_range_var.set("")
+        if hasattr(self, 'dark_check'):
+            self.dark_check.config(state="normal")
+            self.correct_dark_var.set(False)
+        if hasattr(self, 'nl_check'):
+            self.nl_check.config(state="normal")
+            self.correct_nl_var.set(False)
 
     def on_live_view(self):
         """Start live spectrum preview."""
@@ -197,7 +234,7 @@ class AcquisitionApp:
         if self.worker:
             self.worker.go_idle()
             self.live_btn.config(state="normal")
-            self.arm_btn.config(state="normal")
+            self._update_arm_btn_state()
             self.test_trigger_btn.config(state="normal")
             self.stop_btn.config(state="disabled")
             self.worker_state_var.set("State: IDLE")
@@ -294,6 +331,18 @@ class AcquisitionApp:
             self._cleanup_and_quit()
 
     # ═══════════════════════════════════════════════════════════════════
+    #  Helpers
+    # ═══════════════════════════════════════════════════════════════════
+
+    def _update_arm_btn_state(self):
+        """Enable the Arm Trigger button only if the device supports external trigger."""
+        if self.spectrometer and self.spectrometer.is_connected:
+            if self.spectrometer.capabilities.has_external_trigger:
+                self.arm_btn.config(state="normal")
+                return
+        self.arm_btn.config(state="disabled")
+
+    # ═══════════════════════════════════════════════════════════════════
     #  Message Queue Polling (thread-safe GUI updates)
     # ═══════════════════════════════════════════════════════════════════
 
@@ -341,7 +390,7 @@ class AcquisitionApp:
                     self.root.after(2000, lambda: self._remove_highlight())
                     # Return buttons to idle state
                     self.live_btn.config(state="normal")
-                    self.arm_btn.config(state="normal")
+                    self._update_arm_btn_state()
                     self.test_trigger_btn.config(state="normal")
                     self.stop_btn.config(state="disabled")
                     self.worker_state_var.set("State: IDLE")
@@ -349,7 +398,7 @@ class AcquisitionApp:
                 elif msg_type == AcquisitionMessage.IDLE:
                     # Worker returned to idle — restore button state
                     self.live_btn.config(state="normal")
-                    self.arm_btn.config(state="normal")
+                    self._update_arm_btn_state()
                     self.test_trigger_btn.config(state="normal")
                     self.stop_btn.config(state="disabled")
                     self.worker_state_var.set("State: IDLE")

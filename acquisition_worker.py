@@ -32,8 +32,11 @@ class AcquisitionWorker(threading.Thread):
     
     States:
         IDLE  - Not acquiring. Thread is alive but sleeping.
-        LIVE  - Continuous polling (Normal trigger mode 0). For live preview.
-        ARMED - Waiting for external hardware trigger (mode 3). Blocks until laser fires.
+        LIVE  - Continuous polling (Normal trigger mode). For live preview.
+        ARMED - Waiting for external hardware trigger. Blocks until laser fires.
+    
+    Trigger mode integers are read from ``spec.capabilities`` at runtime
+    so they match whatever spectrometer model is connected.
     
     All GUI updates are pushed to a queue.Queue and must be consumed by the
     main thread using root.after() polling.
@@ -100,7 +103,8 @@ class AcquisitionWorker(threading.Thread):
             self._send(AcquisitionMessage.ERROR, "Spectrometer not connected.")
             return
         try:
-            self.spec.set_trigger_mode(0)  # Normal mode
+            normal_mode = self.spec.capabilities.normal_trigger_mode
+            self.spec.set_trigger_mode(normal_mode)
         except Exception as e:
             self._send(AcquisitionMessage.ERROR, str(e))
             return
@@ -112,8 +116,15 @@ class AcquisitionWorker(threading.Thread):
         if not self.spec.is_connected:
             self._send(AcquisitionMessage.ERROR, "Spectrometer not connected.")
             return
+
+        ext_mode = self.spec.capabilities.external_trigger_mode
+        if ext_mode is None:
+            self._send(AcquisitionMessage.ERROR,
+                       f"{self.spec.model} does not support an external hardware trigger.")
+            return
+
         try:
-            self.spec.set_trigger_mode(3)  # External HW edge trigger
+            self.spec.set_trigger_mode(ext_mode)
         except Exception as e:
             self._send(AcquisitionMessage.ERROR, str(e))
             return
@@ -127,7 +138,8 @@ class AcquisitionWorker(threading.Thread):
         # Return spectrometer to normal mode so it doesn't block
         if self.spec.is_connected:
             try:
-                self.spec.set_trigger_mode(0)
+                normal_mode = self.spec.capabilities.normal_trigger_mode
+                self.spec.set_trigger_mode(normal_mode)
             except Exception:
                 pass
         self._send(AcquisitionMessage.STATUS, "Idle")
@@ -237,8 +249,8 @@ class AcquisitionWorker(threading.Thread):
             while not future.done():
                 if self.state != self.STATE_ARMED or self._stop_event.is_set():
                     # User pressed Stop or we're shutting down.
-                    # go_idle() already flipped trigger mode to 0 which should
-                    # unblock the USB read.  Just abandon the future.
+                    # go_idle() already flipped trigger mode to normal which
+                    # should unblock the USB read.  Just abandon the future.
                     self._send(AcquisitionMessage.STATUS, "Trigger cancelled.")
                     executor.shutdown(wait=False)
                     return
@@ -275,7 +287,8 @@ class AcquisitionWorker(threading.Thread):
         # Return to normal mode
         if self.spec.is_connected:
             try:
-                self.spec.set_trigger_mode(0)
+                normal_mode = self.spec.capabilities.normal_trigger_mode
+                self.spec.set_trigger_mode(normal_mode)
             except Exception:
                 pass
         self._set_state(self.STATE_IDLE)
@@ -285,8 +298,9 @@ class AcquisitionWorker(threading.Thread):
         """One-shot normal-mode read pushed through the full capture pipeline."""
         try:
             # Ensure normal mode for immediate read
-            if self.spec.current_trigger_mode != 0:
-                self.spec.set_trigger_mode(0)
+            normal_mode = self.spec.capabilities.normal_trigger_mode
+            if self.spec.current_trigger_mode != normal_mode:
+                self.spec.set_trigger_mode(normal_mode)
 
             intensities = self.spec.get_intensities(
                 correct_dark_counts=self.correct_dark_counts,

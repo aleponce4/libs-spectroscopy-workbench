@@ -141,16 +141,22 @@ def create_acquisition_sidebar(app):
 
     # Corrections
     app.correct_dark_var = tk.BooleanVar(value=False)
-    dark_check = ttk.Checkbutton(int_frame, text="Dark count correction",
+    app.dark_check = ttk.Checkbutton(int_frame, text="Dark count correction",
                                   variable=app.correct_dark_var,
                                   command=app.on_corrections_changed)
-    dark_check.grid(row=2, column=0, columnspan=3, padx=5, pady=2, sticky="w")
+    app.dark_check.grid(row=2, column=0, columnspan=3, padx=5, pady=2, sticky="w")
 
     app.correct_nl_var = tk.BooleanVar(value=False)
-    nl_check = ttk.Checkbutton(int_frame, text="Nonlinearity correction",
+    app.nl_check = ttk.Checkbutton(int_frame, text="Nonlinearity correction",
                                 variable=app.correct_nl_var,
                                 command=app.on_corrections_changed)
-    nl_check.grid(row=3, column=0, columnspan=3, padx=5, pady=2, sticky="w")
+    app.nl_check.grid(row=3, column=0, columnspan=3, padx=5, pady=2, sticky="w")
+
+    # Integration time range hint (populated after connection)
+    app.int_range_var = tk.StringVar(value="")
+    app.int_range_label = ttk.Label(int_frame, textvariable=app.int_range_var,
+                                     style="Status.TLabel", foreground="gray")
+    app.int_range_label.grid(row=4, column=0, columnspan=3, padx=5, pady=(0, 3), sticky="w")
 
     # ─── Auto-Save Settings ────────────────────────────────────────────
     save_frame = ttk.LabelFrame(app.sidebar_frame, text="Auto-Save", padding=5)
