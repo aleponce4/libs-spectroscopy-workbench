@@ -95,6 +95,9 @@ def configure_graph_for_device(ax, canvas, line, capabilities):
     ax.set_xlim([wl_min, wl_max])
     ax.set_ylim([0, max_int])
 
+    # Store device max so the hysteresis auto-scaler knows the floor
+    ax._device_max_intensity = max_int
+
     # Reset the line data to match the new pixel count
     x_placeholder = np.linspace(wl_min, wl_max, pixels)
     line.set_xdata(x_placeholder)
@@ -106,9 +109,18 @@ def configure_graph_for_device(ax, canvas, line, capabilities):
 
 def update_spectrum_fast(ax, canvas, line, wavelengths, intensities):
     """
-    Fast spectrum update — changes only the line data without clearing the axes.
-    Y axis stays at the device's max intensity (set by configure_graph_for_device)
-    to avoid constant rescaling.
+    Fast spectrum update with hysteresis-based Y-axis auto-scaling.
+    
+    The Y-axis adapts so small signals (lamp, noise) are clearly visible, but
+    only rescales when the data peak moves *significantly* outside the current
+    view — preventing the jittery feel of per-frame auto-scale.
+    
+    Rescale triggers:
+      - Peak > 80% of current Y-top  → zoom out  (signal about to clip)
+      - Peak < 25% of current Y-top  → zoom in   (too much wasted space)
+    
+    New Y-top is set to ``peak × 1.3`` (30 % headroom).  A minimum floor
+    prevents the axis from collapsing to near-zero on pure dark noise.
     
     Args:
         ax: Matplotlib Axes
@@ -123,6 +135,28 @@ def update_spectrum_fast(ax, canvas, line, wavelengths, intensities):
     # Update X limits to match actual data range
     if len(wavelengths) > 0:
         ax.set_xlim([wavelengths[0], wavelengths[-1]])
+
+    # --- Hysteresis Y-axis auto-scaling ---
+    if len(intensities) > 0:
+        peak = float(np.max(intensities))
+        current_top = ax.get_ylim()[1]
+
+        # Minimum floor so the axis never gets uselessly tiny
+        # (use device max if stored, otherwise a sensible default)
+        device_max = getattr(ax, '_device_max_intensity', 65535)
+        min_ylim = device_max * 0.01  # 1 % of full scale
+
+        needs_rescale = False
+        if peak > current_top * 0.80:
+            # Signal approaching the top — zoom out
+            needs_rescale = True
+        elif peak < current_top * 0.25 and current_top > min_ylim:
+            # Signal using <25 % of view — zoom in
+            needs_rescale = True
+
+        if needs_rescale:
+            new_top = max(peak * 1.3, min_ylim)
+            ax.set_ylim([0, new_top])
 
     canvas.draw_idle()
 
