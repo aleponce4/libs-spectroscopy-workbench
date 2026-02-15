@@ -463,12 +463,8 @@ class AcquisitionApp:
                     )
                     # Remove highlight after 2 seconds
                     self.root.after(2000, lambda: self._remove_highlight())
-                    # Return buttons to idle state
-                    self.live_btn.config(state="normal")
-                    self._update_arm_btn_state()
-                    self.test_trigger_btn.config(state="normal")
-                    self.stop_btn.config(state="disabled")
-                    self.worker_state_var.set("State: IDLE")
+                    # Stay in ARMED state — worker will auto re-arm
+                    # (buttons stay as-is: Stop enabled, others disabled)
 
                 elif msg_type == AcquisitionMessage.IDLE:
                     # Worker returned to idle — restore button state
