@@ -120,16 +120,22 @@ class AcquisitionApp:
         self.connect_btn.config(state="disabled")
         self.status_message_var.set("Connecting… please wait.")
         self.root.update_idletasks()
+        logger.info("on_connect: spawning background connect thread…")
 
         def _bg_connect():
             try:
+                logger.info("_bg_connect: calling spectrometer.connect()…")
                 status = self.spectrometer.connect()
-                self.root.after(0, lambda: self._finish_connection(status))
+                logger.info("_bg_connect: connect() returned OK")
+                self.root.after(0, lambda s=status: self._finish_connection(s))
             except (NoDeviceError, SpectrometerError) as e:
-                self.root.after(0, lambda: self._on_connect_failed(str(e)))
+                reason = str(e)
+                logger.info(f"_bg_connect: connect() raised {type(e).__name__}: {reason}")
+                self.root.after(0, lambda r=reason: self._on_connect_failed(r))
             except Exception as e:
-                self.root.after(0, lambda: self._on_connect_failed(
-                    f"Unexpected error: {e}"))
+                reason = f"Unexpected error: {e}"
+                logger.info(f"_bg_connect: {reason}")
+                self.root.after(0, lambda r=reason: self._on_connect_failed(r))
 
         threading.Thread(target=_bg_connect, daemon=True,
                          name="ConnectThread").start()
@@ -152,7 +158,8 @@ class AcquisitionApp:
         return dlg.result
 
     def _handle_diagnostic_result(self, result: dict):
-        """Process the result from the diagnostic dialog."""
+        """Process the result from the diagnostic dialog.
+        Connections are run in a background thread to keep the GUI responsive."""
         from spectrometer import (
             SpectrometerModule, ThorlabsCCSModule,
             SpectrometerError,
@@ -176,28 +183,48 @@ class AcquisitionApp:
                 self.spectrometer = ThorlabsCCSModule()
             else:
                 self.spectrometer = SpectrometerModule()
-            try:
-                status = self.spectrometer.connect(device_index=device_index)
-                self._finish_connection(status)
-            except Exception as e:
-                messagebox.showerror(
-                    "Connection Failed",
-                    f"Could not connect to device {device_index}:\n{e}",
-                )
-                self.spectrometer = None
+
+            self.connect_btn.config(state="disabled")
+            self.status_message_var.set("Connecting… please wait.")
+            self.root.update_idletasks()
+
+            def _bg():
+                try:
+                    status = self.spectrometer.connect(device_index=device_index)
+                    self.root.after(0, lambda s=status: self._finish_connection(s))
+                except Exception as e:
+                    msg = f"Could not connect to device {device_index}:\n{e}"
+                    def _fail(m=msg):
+                        messagebox.showerror("Connection Failed", m)
+                        self.spectrometer = None
+                        self.connect_btn.config(state="normal")
+                    self.root.after(0, _fail)
+
+            threading.Thread(target=_bg, daemon=True,
+                             name="DiagConnectThread").start()
 
         elif action == "connect_resource":
             resource = result.get("resource", "")
             self.spectrometer = ThorlabsCCSModule()
-            try:
-                status = self.spectrometer.connect_with_resource(resource)
-                self._finish_connection(status)
-            except Exception as e:
-                messagebox.showerror(
-                    "Connection Failed",
-                    f"Could not connect to VISA resource:\n{resource}\n\n{e}",
-                )
-                self.spectrometer = None
+
+            self.connect_btn.config(state="disabled")
+            self.status_message_var.set("Connecting… please wait.")
+            self.root.update_idletasks()
+
+            def _bg_visa():
+                try:
+                    status = self.spectrometer.connect_with_resource(resource)
+                    self.root.after(0, lambda s=status: self._finish_connection(s))
+                except Exception as e:
+                    msg = f"Could not connect to VISA resource:\n{resource}\n\n{e}"
+                    def _fail(m=msg):
+                        messagebox.showerror("Connection Failed", m)
+                        self.spectrometer = None
+                        self.connect_btn.config(state="normal")
+                    self.root.after(0, _fail)
+
+            threading.Thread(target=_bg_visa, daemon=True,
+                             name="VISAConnectThread").start()
 
     def _finish_connection(self, status: str):
         """Common post-connection setup (UI configuration, worker start)."""
@@ -308,7 +335,6 @@ class AcquisitionApp:
         If loop-arm is enabled, the worker will automatically re-arm
         after each capture until the user clicks Stop."""
         if self.worker:
-            self.worker.loop_armed = self.loop_arm_var.get()
             self.worker.arm_trigger()
             self.live_btn.config(state="disabled")
             self.arm_btn.config(state="disabled")
@@ -329,7 +355,6 @@ class AcquisitionApp:
     def on_stop(self):
         """Stop acquisition (live view or disarm trigger / loop)."""
         if self.worker:
-            self.worker.loop_armed = False  # break the loop first
             self.worker.go_idle()
             self.live_btn.config(state="normal")
             self._update_arm_btn_state()
@@ -487,12 +512,12 @@ class AcquisitionApp:
                     # Remove highlight after 2 seconds
                     self.root.after(2000, lambda: self._remove_highlight())
 
-                    # If loop-arm is active the worker stays in ARMED state
-                    # and will re-arm automatically.  Keep Stop enabled.
-                    if self.loop_arm_var.get() and self.worker and self.worker.state == "ARMED":
-                        self.worker_state_var.set(f"State: ARMED (loop, shot {shot_idx})")
+                    # The worker automatically re-arms after each capture.
+                    # While it stays in ARMED state, keep Stop enabled.
+                    if self.worker and self.worker.state == "ARMED":
+                        self.worker_state_var.set(f"State: ARMED (shot {shot_idx})")
                     else:
-                        # Return buttons to idle state (single-shot)
+                        # Worker returned to idle (error or single-shot test)
                         self.live_btn.config(state="normal")
                         self._update_arm_btn_state()
                         self.test_trigger_btn.config(state="normal")

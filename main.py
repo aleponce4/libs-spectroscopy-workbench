@@ -5,6 +5,14 @@
 import sys
 import os
 import traceback
+import logging
+
+# Configure logging so spectrometer/acquisition messages are visible
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(threadName)s] %(name)s: %(message)s",
+    stream=sys.stdout,
+)
 
 def log_error_to_file(error_message, file_name="error_log.txt"):
     with open(file_name, "a") as error_file:

@@ -82,10 +82,6 @@ class AcquisitionWorker(threading.Thread):
         self.correct_dark_counts = False
         self.correct_nonlinearity = False
 
-        # Loop-arm: when True, after each triggered capture the worker
-        # automatically re-arms instead of returning to IDLE.
-        self.loop_armed = False
-
     # ─── State Management ──────────────────────────────────────────────
 
     @property
@@ -231,23 +227,21 @@ class AcquisitionWorker(threading.Thread):
             time.sleep(self.live_poll_interval)
 
     def _run_armed(self):
-        """Wait for hardware trigger, capture, auto-save.
+        """Wait for hardware trigger, capture, auto-save, then re-arm.
 
-        If ``self.loop_armed`` is True the worker automatically re-arms
-        after each capture so multiple shots can be taken without the user
-        having to click Arm each time.  The loop is broken by Stop (which
-        sets the state to IDLE / sets _stop_event).
+        Automatically loops: after each successful capture the worker
+        re-arms and waits for the next trigger.  The loop runs until the
+        user clicks Stop (which sets state to IDLE / sets _stop_event).
 
-        The blocking intensities() call runs in a disposable thread so that
-        if the user clicks Stop, we can detect the state change and avoid
-        freezing the worker thread.
+        The blocking intensities() call runs in a disposable thread so
+        that Stop can interrupt the wait.
         """
-        while True:  # loop-arm outer loop (runs once when loop_armed is False)
+        while self.state == self.STATE_ARMED and not self._stop_event.is_set():
             try:
                 self._send(AcquisitionMessage.STATUS,
                            "Armed — waiting for laser trigger…")
 
-                # Ensure external trigger mode is set (needed on re-arm cycles)
+                # Ensure external trigger mode is set (needed on re-arm)
                 ext_mode = self.spec.capabilities.external_trigger_mode
                 if ext_mode is not None and self.spec.current_trigger_mode != ext_mode:
                     self.spec.set_trigger_mode(ext_mode)
@@ -283,7 +277,7 @@ class AcquisitionWorker(threading.Thread):
                     "shot_index": self._shot_index,
                 })
                 self._send(AcquisitionMessage.STATUS,
-                           f"Captured shot #{self._shot_index}")
+                           f"Captured shot #{self._shot_index} — re-arming…")
 
                 # Auto-save
                 if self.auto_save_enabled:
@@ -293,24 +287,14 @@ class AcquisitionWorker(threading.Thread):
                 error_msg = str(e)
                 if "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
                     self._send(AcquisitionMessage.STATUS,
-                               "Trigger timed out — no laser pulse detected.")
+                               "Trigger timed out — re-arming…")
+                    continue  # re-arm even after timeout
                 else:
                     self._send(AcquisitionMessage.ERROR,
                                f"Trigger capture error: {e}")
-                break  # exit loop on error
+                    break  # exit loop on real error
 
-            # ── Loop-arm decision ────────────────────────────────────
-            if (self.loop_armed
-                    and self.state == self.STATE_ARMED
-                    and not self._stop_event.is_set()):
-                # Stay in ARMED state and loop back for another capture
-                self._send(AcquisitionMessage.STATUS,
-                           f"Re-arming (loop) — shot {self._shot_index} saved…")
-                continue
-            else:
-                break  # single capture — fall through to idle
-
-        # Return to idle after capture(s) or error
+        # Return to idle
         if self.spec.is_connected:
             try:
                 normal_mode = self.spec.capabilities.normal_trigger_mode
