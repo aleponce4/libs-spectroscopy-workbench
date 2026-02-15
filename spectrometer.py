@@ -796,9 +796,20 @@ class SpectrometerModule(SpectrometerBase):
         self.set_integration_time(self._integration_time_us)
         self.set_trigger_mode(caps.normal_trigger_mode)
 
-        # ── Verification read ──────────────────────────────────────
+        # ── Verification read (timeout-protected) ─────────────────
+        # If the spectrometer was left in external trigger mode from a
+        # previous session that crashed, the first intensities() call can
+        # block forever.  We run it in a background thread with a timeout.
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+        verification_timeout_s = max(
+            5.0,  # at least 5 seconds
+            (self._integration_time_us / 1_000_000.0) * 2 + 3.0  # 2× integration + margin
+        )
         try:
-            test_spectrum = self._spec.intensities()
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="VerifyRead") as executor:
+                future = executor.submit(self._spec.intensities)
+                test_spectrum = future.result(timeout=verification_timeout_s)
+
             if len(test_spectrum) != caps.pixel_count:
                 logger.warning(
                     f"Verification: expected {caps.pixel_count} pixels, "
@@ -806,6 +817,30 @@ class SpectrometerModule(SpectrometerBase):
                 )
             else:
                 logger.info(f"Verification read OK: {caps.pixel_count} pixels returned")
+
+        except FuturesTimeout:
+            # The read timed out — spectrometer is probably stuck in
+            # external trigger mode.  Try toggling the trigger mode and
+            # doing one more read.  If that also fails, continue anyway
+            # (the device *is* connected, it just needs a trigger-mode reset).
+            logger.warning(
+                "Verification read timed out — spectrometer may have been "
+                "left in external trigger mode.  Attempting recovery..."
+            )
+            try:
+                # Toggle to a different mode and back to force a reset
+                self._spec.trigger_mode(0)
+                time.sleep(0.2)
+                with ThreadPoolExecutor(max_workers=1, thread_name_prefix="VerifyRetry") as executor:
+                    future = executor.submit(self._spec.intensities)
+                    future.result(timeout=verification_timeout_s)
+                logger.info("Recovery read succeeded.")
+            except Exception as recovery_err:
+                logger.warning(
+                    f"Recovery read also failed ({recovery_err}). "
+                    f"Continuing anyway — device is connected."
+                )
+
         except Exception as e:
             try:
                 self._spec.close()
