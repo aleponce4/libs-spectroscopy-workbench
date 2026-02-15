@@ -102,13 +102,21 @@ def create_acquisition_sidebar(app):
     )
     app.arm_btn.grid(row=1, column=0, padx=5, pady=3, sticky="ew")
 
+    # Loop-arm toggle (continuous re-arm after each capture)
+    app.loop_arm_var = tk.BooleanVar(value=False)
+    app.loop_arm_check = ttk.Checkbutton(
+        acq_frame, text="Loop (continuous arm)",
+        variable=app.loop_arm_var,
+    )
+    app.loop_arm_check.grid(row=2, column=0, padx=20, pady=(0, 3), sticky="w")
+
     # Test Trigger button
     app.test_trigger_btn = ttk.Button(
         acq_frame, text="Test Trigger",
         compound='left', style="LeftAligned.TButton", width=18,
         command=app.on_test_trigger, state="disabled"
     )
-    app.test_trigger_btn.grid(row=2, column=0, padx=5, pady=3, sticky="ew")
+    app.test_trigger_btn.grid(row=3, column=0, padx=5, pady=3, sticky="ew")
 
     # Stop button
     try:
@@ -122,7 +130,7 @@ def create_acquisition_sidebar(app):
         compound='left', style="LeftAligned.TButton", width=18,
         command=app.on_stop, state="disabled"
     )
-    app.stop_btn.grid(row=3, column=0, padx=5, pady=3, sticky="ew")
+    app.stop_btn.grid(row=4, column=0, padx=5, pady=3, sticky="ew")
 
     # ─── Integration Time ──────────────────────────────────────────────
     int_frame = ttk.LabelFrame(app.sidebar_frame, text="Integration Time", padding=5)

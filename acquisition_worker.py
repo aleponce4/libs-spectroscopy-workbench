@@ -82,6 +82,10 @@ class AcquisitionWorker(threading.Thread):
         self.correct_dark_counts = False
         self.correct_nonlinearity = False
 
+        # Loop-arm: when True, after each triggered capture the worker
+        # automatically re-arms instead of returning to IDLE.
+        self.loop_armed = False
+
     # ─── State Management ──────────────────────────────────────────────
 
     @property
@@ -227,65 +231,86 @@ class AcquisitionWorker(threading.Thread):
             time.sleep(self.live_poll_interval)
 
     def _run_armed(self):
-        """Wait for a single hardware trigger, capture, auto-save, then return to IDLE.
-        
+        """Wait for hardware trigger, capture, auto-save.
+
+        If ``self.loop_armed`` is True the worker automatically re-arms
+        after each capture so multiple shots can be taken without the user
+        having to click Arm each time.  The loop is broken by Stop (which
+        sets the state to IDLE / sets _stop_event).
+
         The blocking intensities() call runs in a disposable thread so that
         if the user clicks Stop, we can detect the state change and avoid
-        freezing the worker thread.  The blocking USB read will eventually
-        return or timeout on its own once we flip the trigger mode back to
-        normal in go_idle().
+        freezing the worker thread.
         """
-        try:
-            self._send(AcquisitionMessage.STATUS, "Armed — waiting for laser trigger...")
+        while True:  # loop-arm outer loop (runs once when loop_armed is False)
+            try:
+                self._send(AcquisitionMessage.STATUS,
+                           "Armed — waiting for laser trigger…")
 
-            # Launch the blocking read in a throwaway thread
-            executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="TriggerRead")
-            future: Future = executor.submit(
-                self.spec.get_intensities,
-                correct_dark_counts=self.correct_dark_counts,
-                correct_nonlinearity=self.correct_nonlinearity,
-            )
+                # Ensure external trigger mode is set (needed on re-arm cycles)
+                ext_mode = self.spec.capabilities.external_trigger_mode
+                if ext_mode is not None and self.spec.current_trigger_mode != ext_mode:
+                    self.spec.set_trigger_mode(ext_mode)
 
-            # Poll the future so we can bail out if the user cancels
-            while not future.done():
-                if self.state != self.STATE_ARMED or self._stop_event.is_set():
-                    # User pressed Stop or we're shutting down.
-                    # go_idle() already flipped trigger mode to normal which
-                    # should unblock the USB read.  Just abandon the future.
-                    self._send(AcquisitionMessage.STATUS, "Trigger cancelled.")
-                    executor.shutdown(wait=False)
-                    return
-                time.sleep(0.1)  # Check 10× per second
+                # Launch the blocking read in a throwaway thread
+                executor = ThreadPoolExecutor(max_workers=1,
+                                              thread_name_prefix="TriggerRead")
+                future: Future = executor.submit(
+                    self.spec.get_intensities,
+                    correct_dark_counts=self.correct_dark_counts,
+                    correct_nonlinearity=self.correct_nonlinearity,
+                )
 
-            # If we get here the capture completed
-            intensities = future.result()  # re-raises any exception from thread
-            executor.shutdown(wait=False)
+                # Poll the future so we can bail out if the user cancels
+                while not future.done():
+                    if self.state != self.STATE_ARMED or self._stop_event.is_set():
+                        self._send(AcquisitionMessage.STATUS, "Trigger cancelled.")
+                        executor.shutdown(wait=False)
+                        return  # go_idle() already flipped trigger mode
+                    time.sleep(0.1)
 
-            wavelengths = self.spec.get_wavelengths()
+                # Capture completed
+                intensities = future.result()
+                executor.shutdown(wait=False)
 
-            self._shot_index += 1
-            self._send(AcquisitionMessage.SPECTRUM, (wavelengths, intensities))
-            self._send(AcquisitionMessage.CAPTURED, {
-                "wavelengths": wavelengths,
-                "intensities": intensities,
-                "shot_index": self._shot_index
-            })
-            self._send(AcquisitionMessage.STATUS,
-                        f"Captured shot #{self._shot_index}")
+                wavelengths = self.spec.get_wavelengths()
 
-            # Auto-save
-            if self.auto_save_enabled:
-                self._auto_save(wavelengths, intensities)
+                self._shot_index += 1
+                self._send(AcquisitionMessage.SPECTRUM, (wavelengths, intensities))
+                self._send(AcquisitionMessage.CAPTURED, {
+                    "wavelengths": wavelengths,
+                    "intensities": intensities,
+                    "shot_index": self._shot_index,
+                })
+                self._send(AcquisitionMessage.STATUS,
+                           f"Captured shot #{self._shot_index}")
 
-        except Exception as e:
-            error_msg = str(e)
-            if "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
-                self._send(AcquisitionMessage.STATUS, "Trigger timed out — no laser pulse detected.")
+                # Auto-save
+                if self.auto_save_enabled:
+                    self._auto_save(wavelengths, intensities)
+
+            except Exception as e:
+                error_msg = str(e)
+                if "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
+                    self._send(AcquisitionMessage.STATUS,
+                               "Trigger timed out — no laser pulse detected.")
+                else:
+                    self._send(AcquisitionMessage.ERROR,
+                               f"Trigger capture error: {e}")
+                break  # exit loop on error
+
+            # ── Loop-arm decision ────────────────────────────────────
+            if (self.loop_armed
+                    and self.state == self.STATE_ARMED
+                    and not self._stop_event.is_set()):
+                # Stay in ARMED state and loop back for another capture
+                self._send(AcquisitionMessage.STATUS,
+                           f"Re-arming (loop) — shot {self._shot_index} saved…")
+                continue
             else:
-                self._send(AcquisitionMessage.ERROR, f"Trigger capture error: {e}")
+                break  # single capture — fall through to idle
 
-        # Return to idle after a single capture (or error)
-        # Return to normal mode
+        # Return to idle after capture(s) or error
         if self.spec.is_connected:
             try:
                 normal_mode = self.spec.capabilities.normal_trigger_mode

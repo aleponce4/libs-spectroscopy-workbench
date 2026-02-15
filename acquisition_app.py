@@ -12,6 +12,7 @@ import numpy as np
 import functools
 import queue
 import logging
+import threading
 
 # Import matplotlib BEFORE any Tk root is created, so the TkAgg backend
 # initialises cleanly (avoids deadlock when a prior Tk root was destroyed).
@@ -94,7 +95,10 @@ class AcquisitionApp:
 
     def on_connect(self):
         """Connect to the spectrometer — asks the user which brand first,
-        or opens diagnostics on failure."""
+        or opens diagnostics on failure.
+
+        The actual connection runs in a background thread so the GUI
+        stays responsive during USB enumeration and device initialisation."""
         from spectrometer import (
             SpectrometerModule, ThorlabsCCSModule,
             SpectrometerError, NoDeviceError,
@@ -107,36 +111,38 @@ class AcquisitionApp:
 
         if brand == "ocean_optics":
             self.spectrometer = SpectrometerModule()
-            sim_profile = None
         elif brand == "thorlabs":
             self.spectrometer = ThorlabsCCSModule()
-            sim_profile = "CCS175"
         else:
             self.spectrometer = SpectrometerModule()
-            sim_profile = None
 
-        try:
-            status = self.spectrometer.connect()
-        except (NoDeviceError, SpectrometerError) as e:
-            # ── Open diagnostic dialog instead of dumb yes/no ───────────
-            self.spectrometer = None
-            result = self._open_diagnostic_dialog(auto_reason=str(e))
-            if result is None:
-                return
-            self._handle_diagnostic_result(result)
-            return
-        except Exception as e:
-            self.spectrometer = None
-            result = self._open_diagnostic_dialog(
-                auto_reason=f"Unexpected error: {e}"
-            )
-            if result is None:
-                return
-            self._handle_diagnostic_result(result)
-            return
+        # Disable the button and show progress while connecting
+        self.connect_btn.config(state="disabled")
+        self.status_message_var.set("Connecting… please wait.")
+        self.root.update_idletasks()
 
-        # ── Normal success path ─────────────────────────────────────────
-        self._finish_connection(status)
+        def _bg_connect():
+            try:
+                status = self.spectrometer.connect()
+                self.root.after(0, lambda: self._finish_connection(status))
+            except (NoDeviceError, SpectrometerError) as e:
+                self.root.after(0, lambda: self._on_connect_failed(str(e)))
+            except Exception as e:
+                self.root.after(0, lambda: self._on_connect_failed(
+                    f"Unexpected error: {e}"))
+
+        threading.Thread(target=_bg_connect, daemon=True,
+                         name="ConnectThread").start()
+
+    def _on_connect_failed(self, reason: str):
+        """Called on the main thread when background connect fails."""
+        self.spectrometer = None
+        self.connect_btn.config(state="normal")
+        self.status_message_var.set("Connection failed.")
+        result = self._open_diagnostic_dialog(auto_reason=reason)
+        if result is None:
+            return
+        self._handle_diagnostic_result(result)
 
     def _open_diagnostic_dialog(self, auto_reason: str | None = None):
         """Show the diagnostic + device picker dialog.
@@ -298,8 +304,11 @@ class AcquisitionApp:
             self.worker_state_var.set("State: LIVE")
 
     def on_arm_trigger(self):
-        """Arm the hardware trigger and wait for laser pulse."""
+        """Arm the hardware trigger and wait for laser pulse.
+        If loop-arm is enabled, the worker will automatically re-arm
+        after each capture until the user clicks Stop."""
         if self.worker:
+            self.worker.loop_armed = self.loop_arm_var.get()
             self.worker.arm_trigger()
             self.live_btn.config(state="disabled")
             self.arm_btn.config(state="disabled")
@@ -318,8 +327,9 @@ class AcquisitionApp:
             self.worker_state_var.set("State: TEST")
 
     def on_stop(self):
-        """Stop acquisition (live view or disarm trigger)."""
+        """Stop acquisition (live view or disarm trigger / loop)."""
         if self.worker:
+            self.worker.loop_armed = False  # break the loop first
             self.worker.go_idle()
             self.live_btn.config(state="normal")
             self._update_arm_btn_state()
@@ -476,12 +486,18 @@ class AcquisitionApp:
                     )
                     # Remove highlight after 2 seconds
                     self.root.after(2000, lambda: self._remove_highlight())
-                    # Return buttons to idle state
-                    self.live_btn.config(state="normal")
-                    self._update_arm_btn_state()
-                    self.test_trigger_btn.config(state="normal")
-                    self.stop_btn.config(state="disabled")
-                    self.worker_state_var.set("State: IDLE")
+
+                    # If loop-arm is active the worker stays in ARMED state
+                    # and will re-arm automatically.  Keep Stop enabled.
+                    if self.loop_arm_var.get() and self.worker and self.worker.state == "ARMED":
+                        self.worker_state_var.set(f"State: ARMED (loop, shot {shot_idx})")
+                    else:
+                        # Return buttons to idle state (single-shot)
+                        self.live_btn.config(state="normal")
+                        self._update_arm_btn_state()
+                        self.test_trigger_btn.config(state="normal")
+                        self.stop_btn.config(state="disabled")
+                        self.worker_state_var.set("State: IDLE")
 
                 elif msg_type == AcquisitionMessage.IDLE:
                     # Worker returned to idle — restore button state
