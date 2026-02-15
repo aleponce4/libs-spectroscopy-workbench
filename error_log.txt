@@ -1,12 +1,17 @@
 Traceback (most recent call last):
-  File "c:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\main.py", line 91, in <module>
+  File "c:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\main.py", line 95, in <module>
     main()
-  File "c:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\main.py", line 43, in main
-    selected_mode = launcher.run()
-                    ^^^^^^^^^^^^^^
-  File "c:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\mode_launcher.py", line 153, in run
-    self.root.mainloop()
-  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.11_3.11.2544.0_x64__qbz5n2kfra8p0\Lib\tkinter\__init__.py", line 1504, in mainloop
-    self.tk.mainloop(n)
+  File "c:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\main.py", line 55, in main
+    app = App()
+          ^^^^^
+  File "c:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\libs_app.py", line 27, in __init__
+    self.root = ThemedTk(theme="sun-valley")
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\LIBS_venv\Lib\site-packages\ttkthemes\themed_tk.py", line 68, in __init__
+    ThemedWidget.__init__(self, self.tk, gif_override)
+  File "C:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\LIBS_venv\Lib\site-packages\ttkthemes\_widget.py", line 63, in __init__
+    self._load_themes()
+  File "C:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\LIBS_venv\Lib\site-packages\ttkthemes\_widget.py", line 73, in _load_themes
+    self.tk.call("package", "require", "ttk::theme::scid")
 KeyboardInterrupt
 

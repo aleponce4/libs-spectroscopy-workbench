@@ -14,7 +14,7 @@ import matplotlib.lines as mlines
 
 class App:
     # Initialize the main window
-    def __init__(self):
+    def __init__(self, root=None):
         # Improve font antialiasing
         if platform.system() == 'Windows':
             from ctypes import windll # type: ignore
@@ -24,12 +24,20 @@ class App:
         self.current_graph_space = None
 
         self.theme_name = "sun-valley"  # Store the theme name as an instance variable
-        self.root = ThemedTk(theme="sun-valley")
-        sv_ttk.set_theme("light")
+
+        if root is not None:
+            # Reuse the shared application root (no new Tk interpreter)
+            self.root = root
+        else:
+            # Standalone launch (e.g. from __main__ block)
+            self.root = ThemedTk(theme="sun-valley")
+            sv_ttk.set_theme("light")
+
         self.root.title("LIBS Identification Software")
         self.root.geometry("1920x1800")
         self.root.minsize(width=1920, height=1080)
-        self.root.state("zoomed")  
+        self.root.state("zoomed")
+        self.root.deiconify()  # Ensure visible (root may have been hidden)  
 
         # Initialize mode_var after self.root is created
         self.mode_var = tk.StringVar(value="Analysis")

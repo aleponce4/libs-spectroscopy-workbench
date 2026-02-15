@@ -1,5 +1,9 @@
 # mode_launcher.py - Initial mode selection window shown before the main application loads.
 # Allows the user to choose between Analysis Mode and Acquisition Mode.
+#
+# Uses a Toplevel dialog on the shared application root so that only ONE
+# Tk interpreter exists for the entire process lifetime (avoids Tcl hangs
+# on Windows when a second Tk() is created after the first was destroyed).
 
 import tkinter as tk
 from tkinter import ttk
@@ -10,46 +14,46 @@ from PIL import Image, ImageTk
 
 
 class ModeLauncher:
-    """A launcher window that lets the user choose between Analysis and Acquisition mode."""
+    """A launcher dialog that lets the user choose between Analysis and Acquisition mode.
+    
+    Args:
+        root: The application-wide ThemedTk root (kept hidden while the
+              launcher dialog is visible).
+    """
 
-    def __init__(self):
-        # DPI awareness on Windows
-        if platform.system() == 'Windows':
-            from ctypes import windll  # type: ignore
-            windll.shcore.SetProcessDpiAwareness(1)
-
+    def __init__(self, root):
         self.selected_mode = None
+        self.root = root  # Shared root — do NOT destroy this
 
-        # Create a plain root window (no sv_ttk — avoids poisoning
-        # the Tcl interpreter cache for the next themed window)
-        self.root = tk.Tk()
-        self.root.title("LIBS Software - Select Mode")
-        self.root.resizable(False, False)
+        # Create the launcher as a Toplevel dialog
+        self.dialog = tk.Toplevel(self.root)
+        self.dialog.title("LIBS Software - Select Mode")
+        self.dialog.resizable(False, False)
 
         # Set the icon
         try:
-            self.root.iconbitmap('Icons/main_icon.ico')
+            self.dialog.iconbitmap('Icons/main_icon.ico')
         except Exception:
             pass
 
         # Center the window
         window_width = 560
         window_height = 480
-        screen_width = self.root.winfo_screenwidth()
-        screen_height = self.root.winfo_screenheight()
+        screen_width = self.dialog.winfo_screenwidth()
+        screen_height = self.dialog.winfo_screenheight()
         x = (screen_width - window_width) // 2
         y = (screen_height - window_height) // 2
-        self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
+        self.dialog.geometry(f"{window_width}x{window_height}+{x}+{y}")
 
         # Handle window close
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.dialog.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build_ui()
 
     def _build_ui(self):
         """Build the launcher UI."""
         # Main container
-        main_frame = ttk.Frame(self.root, padding=30)
+        main_frame = ttk.Frame(self.dialog, padding=30)
         main_frame.pack(fill=tk.BOTH, expand=True)
 
         # Title
@@ -139,16 +143,17 @@ class ModeLauncher:
         ).pack(side=tk.BOTTOM, pady=(15, 0))
 
     def _select_mode(self, mode):
-        """Store the selected mode and close the launcher."""
+        """Store the selected mode and close the launcher dialog."""
         self.selected_mode = mode
-        self.root.destroy()
+        self.dialog.destroy()
 
     def _on_close(self):
-        """Handle window close — exit the application."""
+        """Handle dialog close — signals no mode selected."""
         self.selected_mode = None
-        self.root.destroy()
+        self.dialog.destroy()
 
     def run(self):
-        """Run the launcher and return the selected mode."""
-        self.root.mainloop()
+        """Run the launcher dialog and return the selected mode."""
+        self.dialog.grab_set()
+        self.root.wait_window(self.dialog)
         return self.selected_mode

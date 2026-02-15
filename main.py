@@ -36,40 +36,56 @@ if getattr(sys, 'frozen', False):
 
 def main():
     """Main entry point — shows the mode launcher, then opens the selected mode."""
+    import platform
+
+    # DPI awareness (set once, before any window is created)
+    if platform.system() == 'Windows':
+        from ctypes import windll  # type: ignore
+        windll.shcore.SetProcessDpiAwareness(1)
+
+    # Create a SINGLE ThemedTk root for the entire application lifetime.
+    # On Windows, destroying a Tk root and creating another one causes
+    # the Tcl interpreter to hang, so we reuse one root throughout.
+    from ttkthemes import ThemedTk
+    import sv_ttk
+
+    root = ThemedTk(theme="sun-valley")
+    sv_ttk.set_theme("light")
+    root.withdraw()  # Hidden while the launcher dialog is shown
+
     from mode_launcher import ModeLauncher
 
-    # Show the mode selection launcher
-    launcher = ModeLauncher()
+    # Show the mode selection launcher (as a Toplevel dialog on root)
+    launcher = ModeLauncher(root)
     selected_mode = launcher.run()
 
     if selected_mode is None:
         # User closed the launcher without selecting a mode
+        root.destroy()
         sys.exit(0)
 
     if selected_mode == "Analysis":
         from libs_app import App
-        app = App()
+        app = App(root)
         app.run()
 
     elif selected_mode == "Acquisition":
         from acquisition_app import AcquisitionApp
-        acq_app = AcquisitionApp()
+        acq_app = AcquisitionApp(root)
         acq_app.run()
 
         # Check if there's data to hand off to Analysis mode
         handoff = acq_app.get_handoff_data()
 
-        # Destroy the acquisition window now (after mainloop exited)
-        # so the Tcl interpreter is freed before creating a new Tk root.
-        try:
-            acq_app.root.destroy()
-        except Exception:
-            pass
         if handoff is not None:
             from libs_app import App
             import pandas as pd
 
-            app = App()
+            # Clear existing widgets from the root before reusing it
+            for widget in root.winfo_children():
+                widget.destroy()
+
+            app = App(root)
 
             # Load the captured spectrum directly into the analysis app
             app.x_data = pd.Series(handoff["wavelengths"])

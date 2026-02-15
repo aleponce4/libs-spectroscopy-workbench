@@ -13,6 +13,11 @@ import functools
 import queue
 import logging
 
+# Import matplotlib BEFORE any Tk root is created, so the TkAgg backend
+# initialises cleanly (avoids deadlock when a prior Tk root was destroyed).
+import matplotlib
+import matplotlib.pyplot as plt
+
 logger = logging.getLogger(__name__)
 
 
@@ -29,19 +34,26 @@ class AcquisitionApp:
         - Send captured data to Analysis Mode (in-memory hand-off)
     """
 
-    def __init__(self):
+    def __init__(self, root=None):
         # DPI awareness
         if platform.system() == 'Windows':
             from ctypes import windll  # type: ignore
             windll.shcore.SetProcessDpiAwareness(1)
 
         # ─── Create Window ─────────────────────────────────────────────
-        self.root = ThemedTk(theme="sun-valley")
-        sv_ttk.set_theme("light")
+        if root is not None:
+            # Reuse the shared application root (no new Tk interpreter)
+            self.root = root
+        else:
+            # Standalone launch
+            self.root = ThemedTk(theme="sun-valley")
+            sv_ttk.set_theme("light")
+
         self.root.title("LIBS Acquisition Mode")
         self.root.geometry("1920x1080")
         self.root.minsize(width=1280, height=720)
         self.root.state("zoomed")
+        self.root.deiconify()  # Ensure visible (root may have been hidden)
 
         try:
             self.root.iconbitmap('Icons/main_icon.ico')
@@ -245,6 +257,7 @@ class AcquisitionApp:
         """Disconnect from the spectrometer."""
         if self.worker:
             self.worker.stop()
+            self.worker.join(timeout=3)
             self.worker = None
 
         if self.spectrometer:
@@ -463,8 +476,12 @@ class AcquisitionApp:
                     )
                     # Remove highlight after 2 seconds
                     self.root.after(2000, lambda: self._remove_highlight())
-                    # Worker stays armed for next shot — keep Stop enabled
-                    self.worker_state_var.set("State: ARMED")
+                    # Return buttons to idle state
+                    self.live_btn.config(state="normal")
+                    self._update_arm_btn_state()
+                    self.test_trigger_btn.config(state="normal")
+                    self.stop_btn.config(state="disabled")
+                    self.worker_state_var.set("State: IDLE")
 
                 elif msg_type == AcquisitionMessage.IDLE:
                     # Worker returned to idle — restore button state
@@ -556,22 +573,28 @@ class AcquisitionApp:
 
     def _cleanup_and_quit(self):
         """Stop the worker, disconnect the spectrometer, and exit mainloop.
-        Uses quit() instead of destroy() so that a new Tk root can be created
-        afterwards (for the Analysis mode handoff)."""
+        Uses quit() so the shared root stays alive for Analysis mode handoff."""
         if self.worker:
             self.worker.stop()
+            self.worker.join(timeout=3)
             self.worker = None
 
         if self.spectrometer:
             self.spectrometer.disconnect()
             self.spectrometer = None
 
+        # Remove all acquisition widgets so the root can be reused
+        for widget in self.root.winfo_children():
+            widget.destroy()
+
         self.root.quit()
 
     def _cleanup_and_close(self):
-        """Stop the worker, disconnect the spectrometer, and destroy the window."""
+        """Stop the worker, disconnect the spectrometer, and exit.
+        Used when the user closes the window without handoff."""
         if self.worker:
             self.worker.stop()
+            self.worker.join(timeout=3)
             self.worker = None
 
         if self.spectrometer:
