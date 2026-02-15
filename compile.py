@@ -22,6 +22,10 @@ timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 output_dir = os.path.join(base_output_dir, f"compiled_{timestamp}")
 os.makedirs(output_dir, exist_ok=True)
 
+# Also prepare a separate output folder for an onedir build
+output_dir_onedir = os.path.join(base_output_dir, f"compiled_{timestamp}_dir")
+os.makedirs(output_dir_onedir, exist_ok=True)
+
 # Use PyInstaller from virtual environment if available
 pyinstaller_path = "pyinstaller"
 if os.path.exists("LIBS_venv\\Scripts\\pyinstaller.exe"):
@@ -143,6 +147,41 @@ try:
     except Exception as cleanup_error:
         print(f"Warning: Could not clean old builds: {cleanup_error}")
         
+    # After the onefile build, also create an onedir build for users
+    try:
+        onedir_cmd = list(command)
+        # replace --onefile with --onedir
+        for i, part in enumerate(onedir_cmd):
+            if part == "--onefile":
+                onedir_cmd[i] = "--onedir"
+        # change name and distpath for the onedir build
+        # replace --name=LIBS with --name=LIBS_dir if present
+        for i, part in enumerate(onedir_cmd):
+            if part.startswith("--name="):
+                onedir_cmd[i] = "--name=LIBS_dir"
+        # replace distpath to the onedir output folder
+        for i, part in enumerate(onedir_cmd):
+            if part.startswith("--distpath="):
+                onedir_cmd[i] = f"--distpath={output_dir_onedir}"
+
+        print("Running onedir build:", " ".join(onedir_cmd))
+        subprocess.run(onedir_cmd, check=True)
+        print(f"One-folder build created in {output_dir_onedir}")
+
+        # Zip the onedir output for easy release upload
+        try:
+            import shutil
+            zip_path = os.path.join(output_dir_onedir, "LIBS_dir.zip")
+            shutil.make_archive(zip_path.replace('.zip',''), 'zip', output_dir_onedir)
+            print(f"Zipped onedir build to {zip_path}")
+        except Exception as ze:
+            print(f"Warning: Could not create zip of onedir build: {ze}")
+
+    except subprocess.CalledProcessError as e:
+        print(f"Onedir build failed: {e}")
+    except Exception as e:
+        print(f"Unexpected error during onedir build: {e}")
+
 except subprocess.CalledProcessError as e:
     print(f"An error occurred: {e}")
 except Exception as e:
