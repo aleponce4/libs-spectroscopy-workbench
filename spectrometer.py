@@ -496,7 +496,41 @@ class _SimulatedSpectrometer:
 
 # Known trigger-mode name → int mappings for seabreeze OOI and OBP protocols.
 _NORMAL_MODE_NAMES = {"NORMAL", "OBP_NORMAL"}
-_EXTERNAL_TRIGGER_MODE_NAMES = {"HARDWARE", "EDGE", "OBP_EXTERNAL", "OBP_EDGE"}
+_EXTERNAL_TRIGGER_MODE_NAMES = {
+    "HARDWARE", "EDGE", "OBP_EXTERNAL", "OBP_EDGE",
+    "SYNCHRONIZATION", "LEVEL", "EXTERNAL",
+}
+
+# ── Model-based fallback table ─────────────────────────────────────
+# The cseabreeze C-wrapper (v2.4+) does NOT expose _trigger_modes or
+# _feature_classes, so runtime introspection fails.  This table provides
+# known trigger modes for common Ocean Optics models so the "Arm Trigger"
+# button works even when introspection is unavailable.
+#
+# Source: Ocean Optics OOI protocol documentation & USB4000 datasheet.
+#   0 = Normal (free-running)
+#   1 = Software trigger
+#   2 = External level (synchronisation) trigger
+#   3 = External edge trigger          ← the one used for LIBS
+#
+# Models that share the OOI protocol and the same mode numbers:
+_OOI_EDGE_TRIGGER_MODELS = {
+    "USB2000", "USB2000+", "USB4000", "HR2000", "HR2000+",
+    "HR4000", "QE65000", "QE65Pro", "QEPro", "FLAME-S",
+    "FLAME-T", "Maya2000", "Maya2000Pro", "NIRQuest256",
+    "NIRQuest512",
+}
+
+_MODEL_TRIGGER_FALLBACKS: dict[str, dict[str, int]] = {}
+for _m in _OOI_EDGE_TRIGGER_MODELS:
+    _MODEL_TRIGGER_FALLBACKS[_m] = {"normal": 0, "external": 3}
+
+# OBP-protocol devices (HDX, Ocean ST / SR, etc.) use different codes:
+_MODEL_TRIGGER_FALLBACKS["HDX"] = {"normal": 0, "external": 1}
+_MODEL_TRIGGER_FALLBACKS["Ocean-ST"]  = {"normal": 0, "external": 1}
+_MODEL_TRIGGER_FALLBACKS["Ocean-SR2"] = {"normal": 0, "external": 1}
+_MODEL_TRIGGER_FALLBACKS["Ocean-SR4"] = {"normal": 0, "external": 1}
+_MODEL_TRIGGER_FALLBACKS["Ocean-SR6"] = {"normal": 0, "external": 1}
 
 
 def _build_trigger_map_from_seabreeze(spec) -> dict[str, int]:
@@ -505,6 +539,11 @@ def _build_trigger_map_from_seabreeze(spec) -> dict[str, int]:
     
     Returns a dict like {"normal": 0, "external": 3} (or without "external"
     if the device has no external trigger support).
+    
+    Strategy:
+        1. Try introspecting the seabreeze device object (works with pyseabreeze).
+        2. If introspection fails (cseabreeze C-wrapper), fall back to a
+           model-based lookup table of known Ocean Optics trigger modes.
     """
     trigger_map: dict[str, int] = {}
 
@@ -536,9 +575,10 @@ def _build_trigger_map_from_seabreeze(spec) -> dict[str, int]:
                 mode_name = mode_val.name if hasattr(mode_val, 'name') else str(mode_val)
                 mode_int = int(mode_val)
 
-                if mode_name in _NORMAL_MODE_NAMES:
+                name_upper = mode_name.upper()
+                if name_upper in _NORMAL_MODE_NAMES:
                     trigger_map["normal"] = mode_int
-                elif mode_name in _EXTERNAL_TRIGGER_MODE_NAMES:
+                elif name_upper in _EXTERNAL_TRIGGER_MODE_NAMES:
                     trigger_map["external"] = mode_int
                 # Also keep original mode names for power-users
                 trigger_map[mode_name.lower()] = mode_int
@@ -546,7 +586,23 @@ def _build_trigger_map_from_seabreeze(spec) -> dict[str, int]:
     except Exception as e:
         logger.debug(f"Could not inspect trigger modes from device: {e}")
 
-    # Fallback: at minimum ensure "normal" = 0
+    # ── Fallback: model-based lookup when introspection found nothing ──
+    if "external" not in trigger_map:
+        model = spec.model if hasattr(spec, 'model') else ""
+        fallback = _MODEL_TRIGGER_FALLBACKS.get(model)
+        if fallback is not None:
+            logger.info(
+                f"Introspection did not find trigger modes for {model}; "
+                f"using model-based fallback: {fallback}"
+            )
+            trigger_map.update(fallback)
+        else:
+            logger.info(
+                f"No trigger mode introspection data and no fallback for "
+                f"model '{model}'; only 'normal' mode is available."
+            )
+
+    # Ensure "normal" is always present
     if "normal" not in trigger_map:
         trigger_map["normal"] = 0
 
