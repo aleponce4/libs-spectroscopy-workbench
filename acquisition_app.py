@@ -463,8 +463,8 @@ class AcquisitionApp:
                     )
                     # Remove highlight after 2 seconds
                     self.root.after(2000, lambda: self._remove_highlight())
-                    # Stay in ARMED state — worker will auto re-arm
-                    # (buttons stay as-is: Stop enabled, others disabled)
+                    # Worker stays armed for next shot — keep Stop enabled
+                    self.worker_state_var.set("State: ARMED")
 
                 elif msg_type == AcquisitionMessage.IDLE:
                     # Worker returned to idle — restore button state
