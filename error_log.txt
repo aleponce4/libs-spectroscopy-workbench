@@ -1,0 +1,12 @@
+Traceback (most recent call last):
+  File "c:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\main.py", line 91, in <module>
+    main()
+  File "c:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\main.py", line 43, in main
+    selected_mode = launcher.run()
+                    ^^^^^^^^^^^^^^
+  File "c:\Users\alepo\Desktop\Onteko\LIBS-Data-Analysis\mode_launcher.py", line 153, in run
+    self.root.mainloop()
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.11_3.11.2544.0_x64__qbz5n2kfra8p0\Lib\tkinter\__init__.py", line 1504, in mainloop
+    self.tk.mainloop(n)
+KeyboardInterrupt
+
