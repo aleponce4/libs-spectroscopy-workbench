@@ -21,6 +21,16 @@ The application launches with a mode selector:
 - **Send to Analysis**: Hand off captured spectra directly to Analysis Mode (no disk I/O).
 - **Simulation Mode**: Built-in simulated spectrometer for testing without hardware.
 
+**Note**
+python-seabreeze requires the spectrometer to use a WinUSB/libusb compatible driver rather than the default Ocean Optics driver.
+If the device is not detected:
+1 Install Zadig  
+2 Connect spectrometer  
+3 Select device from list  
+4 Replace driver with WinUSB  
+5 Restart software  
+Note: OceanView will not work while WinUSB is installed. Reinstall Ocean Optics drivers to restore vendor software.****
+
 ## Installation
 
 ### Compiled Software
