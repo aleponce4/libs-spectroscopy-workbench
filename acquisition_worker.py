@@ -10,6 +10,7 @@ import logging
 import os
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, Future
+from plate_autosave import PlateAutosaveConfig, PlateRunState
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,9 @@ class AcquisitionMessage:
     STOPPED = "stopped"            # Worker has stopped
     SAVE_COMPLETE = "save_complete"  # Auto-save finished
     IDLE = "idle"                      # Worker returned to idle (buttons should reset)
+    PLATE_PROGRESS = "plate_progress"  # High-throughput plate progress changed
+    PLATE_COMPLETE = "plate_complete"  # High-throughput plate run finished
+    PLATE_DISCARDED = "plate_discarded"  # Last high-throughput shot was discarded
 
 
 class AcquisitionWorker(threading.Thread):
@@ -71,6 +75,8 @@ class AcquisitionWorker(threading.Thread):
         self.save_directory = os.path.join(os.path.expanduser("~"), "LIBS_Data")
         self.sample_name = "Sample"
         self._shot_index = 0
+        self._plate_lock = threading.Lock()
+        self._plate_run_state = None
 
         # Live view rate limiting
         self.live_poll_interval = 0.05  # 50 ms between live polls
@@ -164,6 +170,49 @@ class AcquisitionWorker(threading.Thread):
     def reset_shot_index(self):
         """Reset the shot counter (e.g., when sample name changes)."""
         self._shot_index = 0
+
+    def set_plate_autosave_config(self, config):
+        """Enable high-throughput plate autosave with a fresh plate run."""
+        if isinstance(config, PlateAutosaveConfig):
+            plate_config = config
+        else:
+            plate_config = PlateAutosaveConfig.from_mapping(config)
+
+        with self._plate_lock:
+            self._plate_run_state = PlateRunState(plate_config)
+            payload = self._plate_run_state.progress_payload()
+
+        self._send(AcquisitionMessage.PLATE_PROGRESS, payload)
+
+    def disable_plate_autosave(self):
+        """Disable high-throughput plate autosave."""
+        with self._plate_lock:
+            self._plate_run_state = None
+
+    def discard_last_plate_shot(self):
+        """Move the latest plate shot to Discarded and roll progress back."""
+        with self._plate_lock:
+            if self._plate_run_state is None:
+                self._send(AcquisitionMessage.ERROR, "No active plate run to discard from.")
+                return
+
+            plate_dir = os.path.join(
+                self.save_directory,
+                self._plate_run_state.config.safe_plate_name,
+            )
+            discarded_dir = os.path.join(plate_dir, "Discarded")
+            record, payload = self._plate_run_state.discard_last(discarded_dir)
+
+        if record is None:
+            self._send(AcquisitionMessage.STATUS, "No plate shot to discard.")
+            return
+
+        self._send(AcquisitionMessage.PLATE_DISCARDED, payload)
+        self._send(AcquisitionMessage.PLATE_PROGRESS, payload)
+        self._send(
+            AcquisitionMessage.STATUS,
+            f"Discarded {record.well} shot {record.shot_number}; repeat this shot.",
+        )
 
     # ─── Thread Main Loop ─────────────────────────────────────────────
 
@@ -281,7 +330,10 @@ class AcquisitionWorker(threading.Thread):
 
                 # Auto-save
                 if self.auto_save_enabled:
-                    self._auto_save(wavelengths, intensities)
+                    self._auto_save(wavelengths, intensities, consume_plate=True)
+                    if self._is_plate_complete():
+                        self._send(AcquisitionMessage.STATUS, "Plate complete.")
+                        break
 
             except Exception as e:
                 error_msg = str(e)
@@ -329,7 +381,7 @@ class AcquisitionWorker(threading.Thread):
                         f"Test capture #{self._shot_index} — pipeline OK")
 
             if self.auto_save_enabled:
-                self._auto_save(wavelengths, intensities)
+                self._auto_save(wavelengths, intensities, consume_plate=False)
 
         except Exception as e:
             self._send(AcquisitionMessage.ERROR, f"Test trigger failed: {e}")
@@ -339,25 +391,72 @@ class AcquisitionWorker(threading.Thread):
 
     # ─── Auto-Save ─────────────────────────────────────────────────────
 
-    def _auto_save(self, wavelengths: np.ndarray, intensities: np.ndarray):
+    def _auto_save(self, wavelengths: np.ndarray, intensities: np.ndarray, consume_plate: bool = True):
         """Save the captured spectrum to a timestamped CSV file."""
         try:
-            os.makedirs(self.save_directory, exist_ok=True)
+            if consume_plate:
+                with self._plate_lock:
+                    if self._plate_run_state is not None:
+                        self._auto_save_plate_locked(wavelengths, intensities)
+                        return
 
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{self.sample_name}_{timestamp}_{self._shot_index:03d}.csv"
-            filepath = os.path.join(self.save_directory, filename)
-
-            # Save as tab-delimited (consistent with LIBS data format)
-            data = np.column_stack((wavelengths, intensities))
-            header = "Wavelength\tIntensity"
-            np.savetxt(filepath, data, delimiter='\t', header=header, comments='', fmt='%.6f')
-
-            self._send(AcquisitionMessage.SAVE_COMPLETE, filepath)
-            logger.info(f"Auto-saved: {filepath}")
+            self._auto_save_standard(wavelengths, intensities)
 
         except Exception as e:
             self._send(AcquisitionMessage.ERROR, f"Auto-save failed: {e}")
+
+    def _auto_save_standard(self, wavelengths: np.ndarray, intensities: np.ndarray):
+        os.makedirs(self.save_directory, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{self.sample_name}_{timestamp}_{self._shot_index:03d}.csv"
+        filepath = os.path.join(self.save_directory, filename)
+
+        self._save_spectrum_file(filepath, wavelengths, intensities)
+
+        self._send(AcquisitionMessage.SAVE_COMPLETE, filepath)
+        logger.info(f"Auto-saved: {filepath}")
+
+    def _auto_save_plate_locked(self, wavelengths: np.ndarray, intensities: np.ndarray):
+        plate_state = self._plate_run_state
+        if plate_state is None:
+            self._auto_save_standard(wavelengths, intensities)
+            return
+
+        assignment = plate_state.next_assignment()
+        if assignment is None:
+            self._send(AcquisitionMessage.PLATE_COMPLETE, plate_state.progress_payload())
+            return
+
+        well, shot_number = assignment
+        plate_dir = os.path.join(self.save_directory, plate_state.config.safe_plate_name)
+        os.makedirs(plate_dir, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = (
+            f"{plate_state.config.safe_plate_name}_{well}_shot{shot_number:02d}_"
+            f"{timestamp}_{self._shot_index:03d}.csv"
+        )
+        filepath = os.path.join(plate_dir, filename)
+
+        self._save_spectrum_file(filepath, wavelengths, intensities)
+        payload = plate_state.record_saved(filepath, self._shot_index)
+
+        self._send(AcquisitionMessage.SAVE_COMPLETE, filepath)
+        self._send(AcquisitionMessage.PLATE_PROGRESS, payload)
+        if payload["complete"]:
+            self._send(AcquisitionMessage.PLATE_COMPLETE, payload)
+        logger.info(f"Plate auto-saved: {filepath}")
+
+    def _save_spectrum_file(self, filepath: str, wavelengths: np.ndarray, intensities: np.ndarray):
+        # Save as tab-delimited (consistent with LIBS data format)
+        data = np.column_stack((wavelengths, intensities))
+        header = "Wavelength\tIntensity"
+        np.savetxt(filepath, data, delimiter='\t', header=header, comments='', fmt='%.6f')
+
+    def _is_plate_complete(self) -> bool:
+        with self._plate_lock:
+            return bool(self._plate_run_state and self._plate_run_state.is_complete)
 
     # ─── Messaging ─────────────────────────────────────────────────────
 

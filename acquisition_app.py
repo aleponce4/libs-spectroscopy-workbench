@@ -13,6 +13,15 @@ import functools
 import queue
 import logging
 import threading
+from PIL import Image, ImageDraw, ImageFont, ImageTk
+from plate_autosave import (
+    ORDER_COLUMN,
+    ORDER_LABELS,
+    ORDER_ROW,
+    PLATE_FORMATS,
+    PlateAutosaveConfig,
+    PlateRunState,
+)
 
 # Import matplotlib BEFORE any Tk root is created, so the TkAgg backend
 # initialises cleanly (avoids deadlock when a prior Tk root was destroyed).
@@ -72,15 +81,65 @@ class AcquisitionApp:
 
         # Data to hand off to Analysis mode
         self._handoff_data = None
+        self.plate_autosave_config = None
+        self.plate_progress = None
+        self.plate_history = []
+        self.current_plate_index = None
 
         # ─── Build UI ──────────────────────────────────────────────────
         # Graph area (offset from sidebar, same as analysis mode)
-        graph_container = tk.Frame(self.root)
-        graph_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=(300, 0))
+        self.graph_container = tk.Frame(self.root)
+        self.graph_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=(300, 0))
 
         from acquisition_graph import create_acquisition_graph
         self.graph_frame, self.fig, self.ax, self.canvas, self.live_line = \
-            create_acquisition_graph(graph_container)
+            create_acquisition_graph(self.graph_container)
+        self.graph_frame.pack_forget()
+        self.graph_container.grid_rowconfigure(0, weight=1)
+        self.graph_container.grid_rowconfigure(1, weight=0)
+        self.graph_container.grid_columnconfigure(0, weight=1)
+        self.graph_frame.grid(row=0, column=0, sticky="nsew")
+
+        self.plate_overview_frame = ttk.LabelFrame(
+            self.graph_container,
+            text="Plate Progress History",
+            padding=(10, 6),
+            height=380,
+        )
+        self.plate_overview_frame.pack_propagate(False)
+        self.plate_history_canvas = tk.Canvas(
+            self.plate_overview_frame,
+            height=330,
+            bg="#F7F9FC",
+            highlightthickness=0,
+        )
+        self.plate_history_scrollbar = ttk.Scrollbar(
+            self.plate_overview_frame,
+            orient=tk.HORIZONTAL,
+            command=self.plate_history_canvas.xview,
+        )
+        self.plate_history_canvas.configure(xscrollcommand=self.plate_history_scrollbar.set)
+        self.plate_history_inner = ttk.Frame(self.plate_history_canvas)
+        self.plate_history_window = self.plate_history_canvas.create_window(
+            (0, 0),
+            window=self.plate_history_inner,
+            anchor="nw",
+        )
+        self.plate_history_inner.bind(
+            "<Configure>",
+            lambda event: self.plate_history_canvas.configure(
+                scrollregion=self.plate_history_canvas.bbox("all")
+            ),
+        )
+        self.plate_history_canvas.bind(
+            "<Configure>",
+            lambda event: self.plate_history_canvas.itemconfigure(
+                self.plate_history_window,
+                height=event.height,
+            ),
+        )
+        self.plate_history_canvas.pack(fill=tk.X, expand=True)
+        self.plate_history_scrollbar.pack(fill=tk.X)
 
         # Sidebar
         from acquisition_sidebar import create_acquisition_sidebar
@@ -108,6 +167,16 @@ class AcquisitionApp:
         brand = self._ask_brand()
         if brand is None:
             return  # user cancelled
+
+        if brand == "simulation":
+            self.spectrometer = SpectrometerModule()
+            try:
+                status = self.spectrometer.connect_simulated()
+                self._finish_connection(status)
+            except Exception as e:
+                messagebox.showerror("Simulation Failed", str(e))
+                self.spectrometer = None
+            return
 
         if brand == "ocean_optics":
             self.spectrometer = SpectrometerModule()
@@ -228,12 +297,15 @@ class AcquisitionApp:
 
     def _finish_connection(self, status: str):
         """Common post-connection setup (UI configuration, worker start)."""
-        self.connection_status_var.set(status)
+        caps = self.spectrometer.capabilities
+        model = caps.model or "Spectrometer"
+        if len(model) > 32:
+            model = f"{model[:29]}..."
+        simulated = " [SIM]" if "SIMULATED" in status.upper() or caps.brand == "simulated" else ""
+        self.connection_status_var.set(f"Connected: {model}{simulated}")
         self.status_message_var.set("Connected successfully.")
 
         # ── Configure UI for the connected device's capabilities ───
-        caps = self.spectrometer.capabilities
-
         # Graph axis limits and placeholder
         from acquisition_graph import configure_graph_for_device
         configure_graph_for_device(self.ax, self.canvas, self.live_line, caps)
@@ -272,6 +344,8 @@ class AcquisitionApp:
         self.worker.auto_save_enabled = self.auto_save_var.get()
         self.worker.save_directory = self.save_dir_var.get()
         self.worker.sample_name = self.sample_name_var.get()
+        if self.plate_mode_var.get() and self.plate_autosave_config is not None:
+            self.worker.set_plate_autosave_config(self.plate_autosave_config)
         self.worker.start()
 
         # Start polling the message queue
@@ -319,6 +393,16 @@ class AcquisitionApp:
         if hasattr(self, 'nl_check'):
             self.nl_check.config(state="normal")
             self.correct_nl_var.set(False)
+        if hasattr(self, 'discard_plate_shot_btn'):
+            self.discard_plate_shot_btn.config(state="disabled")
+        if hasattr(self, 'plate_progress_var'):
+            self.plate_mode_var.set(False)
+            self.configure_plate_btn.config(state="disabled")
+            self.plate_progress_var.set("")
+            self.plate_progress = None
+            self.plate_history = []
+            self.current_plate_index = None
+            self._hide_plate_overview()
 
     def on_live_view(self):
         """Start live spectrum preview."""
@@ -393,8 +477,66 @@ class AcquisitionApp:
 
     def on_auto_save_toggle(self):
         """Toggle auto-save on/off."""
+        if self.plate_mode_var.get() and not self.auto_save_var.get():
+            messagebox.showinfo(
+                "Plate Mode Uses Auto-Save",
+                "High-throughput plate mode needs auto-save so each trigger can advance the plate map.",
+            )
+            self.auto_save_var.set(True)
         if self.worker:
             self.worker.auto_save_enabled = self.auto_save_var.get()
+
+    def on_plate_mode_toggle(self):
+        """Enable or disable high-throughput plate autosave."""
+        if self._is_acquisition_busy():
+            messagebox.showinfo(
+                "Acquisition Running",
+                "Stop acquisition before changing high-throughput plate mode.",
+            )
+            self.plate_mode_var.set(self.plate_progress is not None)
+            return
+
+        if self.plate_mode_var.get():
+            self.auto_save_var.set(True)
+            self.on_auto_save_toggle()
+            self.configure_plate_btn.config(state="normal")
+            if not self.on_configure_plate():
+                self.plate_mode_var.set(False)
+                self.configure_plate_btn.config(state="disabled")
+                self.plate_progress_var.set("")
+                self.plate_history = []
+                self.current_plate_index = None
+                self._hide_plate_overview()
+        else:
+            if self.worker:
+                self.worker.disable_plate_autosave()
+            self.configure_plate_btn.config(state="disabled")
+            self.discard_plate_shot_btn.config(state="disabled")
+            self.plate_progress_var.set("")
+            self.plate_progress = None
+            self.plate_history = []
+            self.current_plate_index = None
+            self._hide_plate_overview()
+
+    def on_configure_plate(self):
+        """Open the high-throughput plate settings dialog."""
+        if self._is_acquisition_busy():
+            messagebox.showinfo(
+                "Acquisition Running",
+                "Stop acquisition before changing plate settings.",
+            )
+            return False
+
+        config = self._ask_plate_settings()
+        if config is None:
+            return False
+        self._apply_plate_config(config)
+        return True
+
+    def on_discard_last_plate_shot(self):
+        """Discard the latest saved high-throughput plate shot."""
+        if self.worker:
+            self.worker.discard_last_plate_shot()
 
     def on_sample_name_changed(self):
         """Update the sample name in the worker and reset shot index."""
@@ -469,6 +611,398 @@ class AcquisitionApp:
     #  Message Queue Polling (thread-safe GUI updates)
     # ═══════════════════════════════════════════════════════════════════
 
+    def _is_acquisition_busy(self):
+        return bool(self.worker and self.worker.state != "IDLE")
+
+    def _apply_plate_config(self, config):
+        if not isinstance(config, PlateAutosaveConfig):
+            config = PlateAutosaveConfig.from_mapping(config)
+
+        self.plate_autosave_config = config
+        self.plate_mode_var.set(True)
+        self.configure_plate_btn.config(state="normal")
+        self.auto_save_var.set(True)
+        self.on_auto_save_toggle()
+
+        state = PlateRunState(config)
+        payload = state.progress_payload()
+        self._start_plate_history_card(payload)
+        self._update_plate_progress(payload)
+        if self.worker:
+            self.worker.set_plate_autosave_config(config)
+
+    def _ask_plate_settings(self):
+        """Show the modal high-throughput plate settings dialog."""
+        current = self.plate_autosave_config or PlateAutosaveConfig()
+        result = {"config": None}
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("High-Throughput Plate Settings")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        dlg.transient(self.root)
+
+        dlg.update_idletasks()
+        pw = self.root.winfo_width()
+        ph = self.root.winfo_height()
+        px = self.root.winfo_x()
+        py = self.root.winfo_y()
+        dw, dh = 720, 520
+        dlg.geometry(f"{dw}x{dh}+{px + (pw - dw) // 2}+{py + (ph - dh) // 2}")
+
+        main = ttk.Frame(dlg, padding=14)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            main,
+            text="High-throughput plate autosave",
+            font=("Segoe UI", 13, "bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+
+        form = ttk.LabelFrame(main, text="Run Settings", padding=10)
+        form.grid(row=1, column=0, sticky="nsw", padx=(0, 12))
+
+        plate_type_var = tk.StringVar(value=str(current.plate_type))
+        plate_name_var = tk.StringVar(value=current.plate_name)
+        shots_var = tk.StringVar(value=str(current.shots_per_well))
+        order_var = tk.StringVar(value=current.order_mode)
+
+        ttk.Label(form, text="Plate type:").grid(row=0, column=0, sticky="w", pady=4)
+        plate_combo = ttk.Combobox(
+            form,
+            textvariable=plate_type_var,
+            values=[str(value) for value in PLATE_FORMATS],
+            width=12,
+            state="readonly",
+        )
+        plate_combo.grid(row=0, column=1, sticky="ew", pady=4)
+
+        ttk.Label(form, text="Plate name:").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Entry(form, textvariable=plate_name_var, width=20).grid(row=1, column=1, sticky="ew", pady=4)
+
+        ttk.Label(form, text="Shots per well:").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Spinbox(form, from_=1, to=99, textvariable=shots_var, width=8).grid(row=2, column=1, sticky="w", pady=4)
+
+        ttk.Label(form, text="Order:").grid(row=3, column=0, sticky="w", pady=4)
+        ttk.Radiobutton(form, text=ORDER_LABELS[ORDER_ROW], value=ORDER_ROW, variable=order_var).grid(
+            row=3, column=1, sticky="w", pady=(4, 1)
+        )
+        ttk.Radiobutton(form, text=ORDER_LABELS[ORDER_COLUMN], value=ORDER_COLUMN, variable=order_var).grid(
+            row=4, column=1, sticky="w", pady=(1, 4)
+        )
+
+        ttk.Label(
+            form,
+            text="Files are saved into a subfolder named after the plate.",
+            style="Status.TLabel",
+            wraplength=210,
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(12, 0))
+
+        preview_frame = ttk.LabelFrame(main, text="Plate Preview", padding=10)
+        preview_frame.grid(row=1, column=1, sticky="nsew")
+        preview_canvas = tk.Canvas(
+            preview_frame,
+            width=420,
+            height=320,
+            bg="#F7F9FC",
+            highlightthickness=1,
+            highlightbackground="#C8D0DA",
+        )
+        preview_canvas.pack(fill=tk.BOTH, expand=True)
+
+        button_bar = ttk.Frame(main)
+        button_bar.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+
+        def _current_dialog_config():
+            return PlateAutosaveConfig.from_mapping({
+                "plate_type": plate_type_var.get(),
+                "plate_name": plate_name_var.get(),
+                "shots_per_well": shots_var.get(),
+                "order_mode": order_var.get(),
+            })
+
+        def _redraw_preview(*_):
+            try:
+                preview_state = PlateRunState(_current_dialog_config())
+                self._draw_plate_payload(preview_canvas, preview_state.progress_payload(), preview=True)
+            except Exception:
+                preview_canvas.delete("all")
+                preview_canvas.create_text(
+                    210,
+                    160,
+                    text="Enter a valid shot count.",
+                    fill="#A33",
+                    font=("Segoe UI", 10, "bold"),
+                )
+
+        def _apply():
+            try:
+                config = _current_dialog_config()
+            except Exception:
+                messagebox.showwarning("Invalid Plate Settings", "Please enter a valid shot count.", parent=dlg)
+                return
+            result["config"] = config
+            dlg.destroy()
+
+        for var in (plate_type_var, plate_name_var, shots_var, order_var):
+            var.trace_add("write", _redraw_preview)
+
+        ttk.Button(button_bar, text="Cancel", width=12, command=dlg.destroy).pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(button_bar, text="Use Plate Settings", width=18, command=_apply).pack(side=tk.RIGHT)
+
+        _redraw_preview()
+        dlg.wait_window()
+        return result["config"]
+
+    def _update_plate_progress(self, payload):
+        self.plate_progress = payload
+        if not payload:
+            return
+
+        self._update_plate_history_card(payload)
+        if payload["current_well"] is None:
+            next_text = "complete"
+        else:
+            next_text = f"next {payload['current_well']}"
+
+        self.plate_progress_var.set(
+            f"{payload['plate_name']} ({payload['plate_type']}-well): "
+            f"{payload['complete_wells']}/{payload['total_wells']} wells, {next_text}"
+        )
+        self._show_plate_overview()
+        self._redraw_plate_history()
+        self.discard_plate_shot_btn.config(state="normal" if payload.get("can_discard") else "disabled")
+
+    def _start_plate_history_card(self, payload):
+        if self.current_plate_index is None:
+            self.plate_history = [dict(payload)]
+            self.current_plate_index = 0
+            return
+
+        current = self.plate_history[self.current_plate_index]
+        if current.get("complete"):
+            if self.current_plate_index < len(self.plate_history) - 1:
+                self.current_plate_index += 1
+                self.plate_history[self.current_plate_index] = dict(payload)
+            else:
+                self.plate_history.append(dict(payload))
+                self.current_plate_index = len(self.plate_history) - 1
+        else:
+            self.plate_history[self.current_plate_index] = dict(payload)
+
+    def _update_plate_history_card(self, payload):
+        if self.current_plate_index is None:
+            self._start_plate_history_card(payload)
+            return
+        self.plate_history[self.current_plate_index] = dict(payload)
+
+    def _append_next_plate_placeholder(self, payload):
+        if self.current_plate_index is None or not payload.get("complete"):
+            return
+        if self.current_plate_index < len(self.plate_history) - 1:
+            return
+
+        config = PlateAutosaveConfig.from_mapping({
+            "plate_type": payload["plate_type"],
+            "plate_name": payload["plate_name"],
+            "shots_per_well": payload["shots_per_well"],
+            "order_mode": payload["order_mode"],
+        })
+        next_payload = PlateRunState(config).progress_payload()
+        self.plate_history.append(next_payload)
+
+    def _show_plate_overview(self):
+        if not self.plate_overview_frame.winfo_ismapped():
+            self.plate_overview_frame.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
+            self.root.update_idletasks()
+            self.canvas.draw_idle()
+
+    def _hide_plate_overview(self):
+        if hasattr(self, "plate_overview_frame"):
+            self.plate_overview_frame.grid_forget()
+
+    def _redraw_plate_history(self, focus_index=None):
+        for child in self.plate_history_inner.winfo_children():
+            child.destroy()
+
+        for index, payload in enumerate(self.plate_history):
+            title = f"{payload['plate_name']} - Plate {index + 1}"
+            if index == self.current_plate_index and not payload.get("complete"):
+                title += " (current)"
+            elif payload.get("complete"):
+                title += " (done)"
+            elif self.current_plate_index is not None and index > self.current_plate_index:
+                title += " (next)"
+
+            card = ttk.LabelFrame(self.plate_history_inner, text=title, padding=(6, 4))
+            card.grid(row=0, column=index, sticky="n", padx=(0, 10), pady=2)
+            plate_canvas = tk.Canvas(
+                card,
+                width=430,
+                height=290,
+                bg="#F7F9FC",
+                highlightthickness=1,
+                highlightbackground="#C8D0DA",
+            )
+            plate_canvas.pack()
+            self._draw_plate_payload(plate_canvas, payload, preview=False)
+
+        self.plate_history_inner.update_idletasks()
+        self.plate_history_canvas.configure(scrollregion=self.plate_history_canvas.bbox("all"))
+
+        if focus_index is None:
+            focus_index = self.current_plate_index
+        if focus_index is None or not self.plate_history_inner.winfo_children():
+            return
+
+        focus_index = max(0, min(focus_index, len(self.plate_history_inner.winfo_children()) - 1))
+        target = self.plate_history_inner.winfo_children()[focus_index]
+        scroll_region = self.plate_history_canvas.bbox("all")
+        if not scroll_region:
+            return
+
+        content_width = scroll_region[2] - scroll_region[0]
+        visible_width = self.plate_history_canvas.winfo_width()
+        if content_width <= visible_width:
+            self.plate_history_canvas.xview_moveto(0)
+            return
+        max_scroll = max(1, content_width - visible_width)
+        self.plate_history_canvas.xview_moveto(max(0, min(target.winfo_x() / max_scroll, 1)))
+
+    def _draw_plate_payload(self, canvas, payload, preview=False):
+        canvas.delete("all")
+
+        width = max(canvas.winfo_width(), int(canvas.cget("width") or 1))
+        height = max(canvas.winfo_height(), int(canvas.cget("height") or 1))
+        scale = 3
+        rows = payload["rows"]
+        columns = payload["columns"]
+        shots_per_well = payload["shots_per_well"]
+        shots_by_well = payload["shots_by_well"]
+        current_well = payload["current_well"]
+
+        image = Image.new("RGB", (width * scale, height * scale), "#F7F9FC")
+        draw = ImageDraw.Draw(image)
+
+        def px(value):
+            return int(round(value * scale))
+
+        def xy(x, y):
+            return (px(x), px(y))
+
+        def font(size, bold=False):
+            font_name = "segoeuib.ttf" if bold else "segoeui.ttf"
+            try:
+                return ImageFont.truetype(font_name, max(6, px(size)))
+            except OSError:
+                return ImageFont.load_default()
+
+        def draw_arrow_line(start, end, color):
+            draw.line((xy(*start), xy(*end)), fill=color, width=max(1, px(2)))
+            sx, sy = start
+            ex, ey = end
+            if abs(ex - sx) >= abs(ey - sy):
+                direction = 1 if ex >= sx else -1
+                arrow = [
+                    xy(ex, ey),
+                    xy(ex - direction * 7, ey - 4),
+                    xy(ex - direction * 7, ey + 4),
+                ]
+            else:
+                direction = 1 if ey >= sy else -1
+                arrow = [
+                    xy(ex, ey),
+                    xy(ex - 4, ey - direction * 7),
+                    xy(ex + 4, ey - direction * 7),
+                ]
+            draw.polygon(arrow, fill=color)
+
+        title = f"{payload['plate_type']}-well - {payload['order_label']}"
+        draw.text(xy(8, 10), title, anchor="lt", fill="#1E2B36", font=font(9, bold=True))
+        if payload["order_mode"] == ORDER_ROW:
+            arrow_text = "Move left to right, then next row"
+        else:
+            arrow_text = "Move top to bottom, then next column"
+        draw.text(xy(8, 29), arrow_text, anchor="lt", fill="#546270", font=font(8))
+
+        left_bound = 54 if preview else 48
+        top_bound = 76 if preview else 72
+        right_bound = width - 16
+        bottom_bound = height - 16
+        available_w = max(10, right_bound - left_bound)
+        available_h = max(10, bottom_bound - top_bound)
+        plate_ratio = columns / rows
+        if available_w / available_h > plate_ratio:
+            grid_h = available_h
+            grid_w = grid_h * plate_ratio
+        else:
+            grid_w = available_w
+            grid_h = grid_w / plate_ratio
+        left = left_bound + (available_w - grid_w) / 2
+        top = top_bound + (available_h - grid_h) / 2
+        right = left + grid_w
+        bottom = top + grid_h
+        cell_w = (right - left) / columns
+        cell_h = (bottom - top) / rows
+        min_cell = min(cell_w, cell_h)
+        radius = max(2, min_cell * 0.36)
+        count_font_size = 8 if min_cell >= 16 else 6
+        show_counts = min_cell >= 9
+        show_edge_labels = min_cell >= 8
+        edge_font = font(8 if min_cell >= 13 else 6, bold=True)
+        count_font = font(count_font_size, bold=True)
+
+        if payload["order_mode"] == ORDER_ROW:
+            draw_arrow_line((left + cell_w * 0.2, top - 27), (right - cell_w * 0.2, top - 27), "#1D6FB8")
+        else:
+            draw_arrow_line((left - 28, top + cell_h * 0.2), (left - 28, bottom - cell_h * 0.2), "#1D6FB8")
+
+        if show_edge_labels:
+            for column in range(1, columns + 1):
+                cx = left + (column - 0.5) * cell_w
+                draw.text(xy(cx, top - 13), str(column), anchor="mm", fill="#455462", font=edge_font)
+            for row in range(rows):
+                cy = top + (row + 0.5) * cell_h
+                draw.text(xy(left - 13, cy), chr(65 + row), anchor="mm", fill="#455462", font=edge_font)
+
+        for row in range(rows):
+            for column in range(1, columns + 1):
+                well = f"{chr(65 + row)}{column}"
+                count = shots_by_well.get(well, 0)
+                cx = left + (column - 0.5) * cell_w
+                cy = top + (row + 0.5) * cell_h
+                fill = "#DDE5EE"
+                outline = "#9BA8B4"
+                width_px = 1
+                if count >= shots_per_well:
+                    fill = "#55B97D"
+                    outline = "#2F7E50"
+                elif count > 0:
+                    fill = "#F3C760"
+                    outline = "#A87A16"
+                if well == current_well:
+                    outline = "#D33232"
+                    width_px = 2
+
+                draw.ellipse(
+                    (
+                        px(cx - radius),
+                        px(cy - radius),
+                        px(cx + radius),
+                        px(cy + radius),
+                    ),
+                    fill=fill,
+                    outline=outline,
+                    width=max(1, px(width_px)),
+                )
+                if show_counts and count > 0:
+                    draw.text(xy(cx, cy), str(count), anchor="mm", fill="#14212B", font=count_font)
+
+        resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+        photo = ImageTk.PhotoImage(image.resize((width, height), resample))
+        canvas.create_image(0, 0, image=photo, anchor=tk.NW)
+        canvas._plate_image = photo
+
     def _poll_queue(self):
         """Check the worker's message queue and process all pending messages."""
         if self.worker is None:
@@ -535,6 +1069,21 @@ class AcquisitionApp:
                 elif msg_type == AcquisitionMessage.SAVE_COMPLETE:
                     self.status_message_var.set(f"Saved: {os.path.basename(data)}")
 
+                elif msg_type == AcquisitionMessage.PLATE_PROGRESS:
+                    self._update_plate_progress(data)
+
+                elif msg_type == AcquisitionMessage.PLATE_DISCARDED:
+                    self._update_plate_progress(data)
+                    discarded = data.get("discarded")
+                    if discarded:
+                        self.status_message_var.set(f"Discarded: {os.path.basename(discarded)}")
+
+                elif msg_type == AcquisitionMessage.PLATE_COMPLETE:
+                    self._update_plate_progress(data)
+                    self._append_next_plate_placeholder(data)
+                    self._redraw_plate_history(focus_index=len(self.plate_history) - 1)
+                    self.status_message_var.set("Plate complete.")
+
                 elif msg_type == AcquisitionMessage.STOPPED:
                     self.worker_state_var.set("State: STOPPED")
 
@@ -560,12 +1109,13 @@ class AcquisitionApp:
         """
         Show a small dialog asking the user to pick a spectrometer brand.
         
-        Returns ``"ocean_optics"``, ``"thorlabs"``, or ``None`` if cancelled.
+        Returns ``"ocean_optics"``, ``"thorlabs"``, ``"simulation"``,
+        or ``None`` if cancelled.
         """
         result = {"value": None}
 
         dlg = tk.Toplevel(self.root)
-        dlg.title("Select Spectrometer Brand")
+        dlg.title("Select Spectrometer Connection")
         dlg.resizable(False, False)
         dlg.grab_set()
         dlg.transient(self.root)
@@ -576,10 +1126,10 @@ class AcquisitionApp:
         ph = self.root.winfo_height()
         px = self.root.winfo_x()
         py = self.root.winfo_y()
-        dw, dh = 340, 170
+        dw, dh = 560, 190
         dlg.geometry(f"{dw}x{dh}+{px + (pw - dw) // 2}+{py + (ph - dh) // 2}")
 
-        ttk.Label(dlg, text="Which spectrometer brand?",
+        ttk.Label(dlg, text="Choose a spectrometer connection",
                   font=("Segoe UI", 11, "bold")).pack(pady=(18, 10))
 
         btn_frame = ttk.Frame(dlg)
@@ -593,9 +1143,11 @@ class AcquisitionApp:
                    command=lambda: _pick("ocean_optics")).pack(side=tk.LEFT, padx=8)
         ttk.Button(btn_frame, text="Thorlabs CCS", width=16,
                    command=lambda: _pick("thorlabs")).pack(side=tk.LEFT, padx=8)
+        ttk.Button(btn_frame, text="Simulation Mode", width=18,
+                   command=lambda: _pick("simulation")).pack(side=tk.LEFT, padx=8)
 
         ttk.Button(dlg, text="Cancel", width=10,
-                   command=dlg.destroy).pack(pady=(10, 0))
+                   command=dlg.destroy).pack(pady=(16, 0))
 
         dlg.wait_window()
         return result["value"]

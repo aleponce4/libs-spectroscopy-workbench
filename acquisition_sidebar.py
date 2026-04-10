@@ -26,7 +26,7 @@ def create_acquisition_sidebar(app):
     style.configure("StatusValue.TLabel", font=("Segoe UI", 9, "bold"))
 
     header_label = ttk.Label(app.sidebar_frame, text="Acquisition", style="Emphasized.TLabel")
-    header_label.grid(row=0, column=0, padx=10, pady=(60, 2))
+    header_label.grid(row=0, column=0, padx=10, pady=(18, 2))
 
     # ─── Connection Section ────────────────────────────────────────────
     conn_frame = ttk.LabelFrame(app.sidebar_frame, text="Spectrometer", padding=5)
@@ -67,7 +67,7 @@ def create_acquisition_sidebar(app):
     # Status indicator
     app.connection_status_var = tk.StringVar(value="Disconnected")
     status_label = ttk.Label(conn_frame, textvariable=app.connection_status_var,
-                             style="Status.TLabel", foreground="gray")
+                             style="Status.TLabel", foreground="gray", wraplength=230)
     status_label.grid(row=3, column=0, padx=5, pady=(2, 5), sticky="w")
 
     # ─── Acquisition Controls ──────────────────────────────────────────
@@ -125,46 +125,79 @@ def create_acquisition_sidebar(app):
     app.stop_btn.grid(row=3, column=0, padx=5, pady=3, sticky="ew")
 
     # ─── Integration Time ──────────────────────────────────────────────
-    int_frame = ttk.LabelFrame(app.sidebar_frame, text="Integration Time", padding=5)
+    int_frame = ttk.LabelFrame(app.sidebar_frame, text="Advanced Options", padding=5)
     int_frame.grid(row=3, column=0, padx=20, pady=5, sticky="ew")
+    int_frame.columnconfigure(0, weight=1)
 
     app.integration_var = tk.StringVar(value="100")
-    int_entry = ttk.Entry(int_frame, textvariable=app.integration_var, width=10)
+    app.advanced_options_expanded = tk.BooleanVar(value=False)
+    app.advanced_options_label_var = tk.StringVar()
+    app.advanced_options_body = ttk.Frame(int_frame)
+
+    def _set_advanced_options_label(*_):
+        arrow = "v" if app.advanced_options_expanded.get() else ">"
+        app.advanced_options_label_var.set(
+            f"Integration: {app.integration_var.get()} ms {arrow}"
+        )
+
+    def _toggle_advanced_options():
+        app.advanced_options_expanded.set(not app.advanced_options_expanded.get())
+        if app.advanced_options_expanded.get():
+            app.advanced_options_body.grid(row=1, column=0, sticky="ew")
+        else:
+            app.advanced_options_body.grid_remove()
+        _set_advanced_options_label()
+
+    app.integration_var.trace_add("write", _set_advanced_options_label)
+    _set_advanced_options_label()
+
+    app.advanced_options_btn = ttk.Button(
+        int_frame,
+        textvariable=app.advanced_options_label_var,
+        command=_toggle_advanced_options,
+        style="LeftAligned.TButton",
+        width=18,
+    )
+    app.advanced_options_btn.grid(row=0, column=0, padx=5, pady=3, sticky="ew")
+
+    int_entry = ttk.Entry(app.advanced_options_body, textvariable=app.integration_var, width=10)
     int_entry.grid(row=0, column=0, padx=5, pady=3, sticky="w")
 
-    ttk.Label(int_frame, text="ms", style="Status.TLabel").grid(row=0, column=1, padx=2, pady=3, sticky="w")
+    ttk.Label(app.advanced_options_body, text="ms", style="Status.TLabel").grid(row=0, column=1, padx=2, pady=3, sticky="w")
 
     app.apply_int_btn = ttk.Button(
-        int_frame, text="Apply", width=8,
+        app.advanced_options_body, text="Apply", width=8,
         command=app.on_apply_integration, state="disabled"
     )
     app.apply_int_btn.grid(row=0, column=2, padx=5, pady=3, sticky="e")
 
     # Averages
-    ttk.Label(int_frame, text="Averages:", style="Status.TLabel").grid(row=1, column=0, padx=5, pady=3, sticky="w")
+    ttk.Label(app.advanced_options_body, text="Averages:", style="Status.TLabel").grid(row=1, column=0, padx=5, pady=3, sticky="w")
     app.averages_var = tk.StringVar(value="1")
-    avg_spinbox = ttk.Spinbox(int_frame, from_=1, to=100, width=5,
+    avg_spinbox = ttk.Spinbox(app.advanced_options_body, from_=1, to=100, width=5,
                                textvariable=app.averages_var, command=app.on_averages_changed)
     avg_spinbox.grid(row=1, column=1, columnspan=2, padx=5, pady=3, sticky="w")
 
     # Corrections
     app.correct_dark_var = tk.BooleanVar(value=False)
-    app.dark_check = ttk.Checkbutton(int_frame, text="Dark count correction",
+    app.dark_check = ttk.Checkbutton(app.advanced_options_body, text="Dark count correction",
                                   variable=app.correct_dark_var,
                                   command=app.on_corrections_changed)
     app.dark_check.grid(row=2, column=0, columnspan=3, padx=5, pady=2, sticky="w")
 
     app.correct_nl_var = tk.BooleanVar(value=False)
-    app.nl_check = ttk.Checkbutton(int_frame, text="Nonlinearity correction",
+    app.nl_check = ttk.Checkbutton(app.advanced_options_body, text="Nonlinearity correction",
                                 variable=app.correct_nl_var,
                                 command=app.on_corrections_changed)
     app.nl_check.grid(row=3, column=0, columnspan=3, padx=5, pady=2, sticky="w")
 
     # Integration time range hint (populated after connection)
     app.int_range_var = tk.StringVar(value="")
-    app.int_range_label = ttk.Label(int_frame, textvariable=app.int_range_var,
+    app.int_range_label = ttk.Label(app.advanced_options_body, textvariable=app.int_range_var,
                                      style="Status.TLabel", foreground="gray")
     app.int_range_label.grid(row=4, column=0, columnspan=3, padx=5, pady=(0, 3), sticky="w")
+    app.advanced_options_body.grid(row=1, column=0, sticky="ew")
+    app.advanced_options_body.grid_remove()
 
     # ─── Auto-Save Settings ────────────────────────────────────────────
     save_frame = ttk.LabelFrame(app.sidebar_frame, text="Auto-Save", padding=5)
@@ -198,6 +231,41 @@ def create_acquisition_sidebar(app):
     app.shot_count_var = tk.StringVar(value="Shots: 0")
     ttk.Label(save_frame, textvariable=app.shot_count_var,
               style="StatusValue.TLabel").grid(row=3, column=0, columnspan=2, padx=5, pady=3, sticky="w")
+
+    # High-throughput plate mode
+    app.plate_mode_var = tk.BooleanVar(value=False)
+    plate_mode_check = ttk.Checkbutton(
+        save_frame,
+        text="High-throughput plate mode",
+        variable=app.plate_mode_var,
+        command=app.on_plate_mode_toggle,
+    )
+    plate_mode_check.grid(row=4, column=0, columnspan=2, padx=5, pady=(6, 3), sticky="w")
+
+    app.configure_plate_btn = ttk.Button(
+        save_frame,
+        text="Configure Plate...",
+        command=app.on_configure_plate,
+        state="disabled",
+    )
+    app.configure_plate_btn.grid(row=5, column=0, columnspan=2, padx=5, pady=3, sticky="ew")
+
+    app.plate_progress_var = tk.StringVar(value="")
+    app.plate_progress_label = ttk.Label(
+        save_frame,
+        textvariable=app.plate_progress_var,
+        style="Status.TLabel",
+        wraplength=220,
+    )
+    app.plate_progress_label.grid(row=6, column=0, columnspan=2, padx=5, pady=2, sticky="w")
+
+    app.discard_plate_shot_btn = ttk.Button(
+        save_frame,
+        text="Discard Last Shot",
+        command=app.on_discard_last_plate_shot,
+        state="disabled",
+    )
+    app.discard_plate_shot_btn.grid(row=7, column=0, columnspan=2, padx=5, pady=(3, 5), sticky="ew")
 
     # ─── Actions ───────────────────────────────────────────────────────
     action_frame = ttk.LabelFrame(app.sidebar_frame, text="Actions", padding=5)

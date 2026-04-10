@@ -1,6 +1,7 @@
 import os
 import subprocess
 import tkinter
+import sys
 from datetime import datetime
 
 # Define paths and options
@@ -26,10 +27,8 @@ os.makedirs(output_dir, exist_ok=True)
 output_dir_onedir = os.path.join(base_output_dir, f"compiled_{timestamp}_dir")
 os.makedirs(output_dir_onedir, exist_ok=True)
 
-# Use PyInstaller from virtual environment if available
-pyinstaller_path = "pyinstaller"
-if os.path.exists("LIBS_venv\\Scripts\\pyinstaller.exe"):
-    pyinstaller_path = "LIBS_venv\\Scripts\\pyinstaller.exe"
+# Use the project release virtual environment.
+python_path = os.path.join("LIBS_venv", "Scripts", "python.exe")
 
 # Comprehensive hidden imports (based on systematic analysis)
 hidden_imports = [
@@ -38,11 +37,12 @@ hidden_imports = [
     "email.mime.base", "html.parser", "http.client", "http.server",
     
     # Core detected modules from dependency analysis
-    "PIL", "PIL._tkinter_finder", "markdown", "matplotlib", "matplotlib.backends.backend_tkagg", 
+    "PIL", "PIL.Image", "PIL.ImageDraw", "PIL.ImageFont", "PIL.ImageTk",
+    "PIL._tkinter_finder", "markdown", "matplotlib", "matplotlib.backends.backend_tkagg",
     "matplotlib.figure", "numpy", "numpy.core._methods", "numpy.lib.format", "pandas", 
     "pandas._libs.tslibs.base", "pandas._libs.tslibs.nattype", "pywt", "scipy", 
-    "scipy.sparse.csgraph._validation", "scipy.special._ufuncs", "sklearn", 
-    "sklearn.neighbors.typedefs", "sklearn.utils._cython_blas", "statsmodels", 
+    "scipy.sparse.csgraph._validation", "scipy.special._ufuncs", "sklearn",
+    "sklearn.utils._cython_blas", "statsmodels",
     "sv_ttk", "textalloc", "tkhtmlview", "ttkthemes", "ttkthemes.themed_style", 
     "ttkthemes.themed_tk",
     
@@ -55,17 +55,19 @@ hidden_imports = [
     "pandas.io.formats.style", "pandas.plotting",
     
     # Additional imports for robustness
-    "pkg_resources.py2_warn", "pkg_resources", "openpyxl", "xlsxwriter", "certifi", "urllib3",
+    "pkg_resources", "openpyxl", "xlsxwriter", "certifi", "urllib3",
     
     # Acquisition mode modules
     "seabreeze", "seabreeze.spectrometers", "usb", "usb.core", "usb.backend",
     "mode_launcher", "acquisition_app", "acquisition_graph", "acquisition_sidebar",
-    "acquisition_worker", "spectrometer", "queue", "threading"
+    "acquisition_worker", "plate_autosave", "spectrometer", "queue", "threading"
 ]
 
 # Build the command for PyInstaller
 command = [
-    pyinstaller_path,
+    python_path,
+    "-m",
+    "PyInstaller",
     "--onefile",
     "--windowed",  # Back to windowed mode for production
     f"--icon={icon_path}",
@@ -184,6 +186,8 @@ try:
 
 except subprocess.CalledProcessError as e:
     print(f"An error occurred: {e}")
+    sys.exit(1)
 except Exception as e:
     print(f"An unexpected error occurred: {e}")
+    sys.exit(1)
 

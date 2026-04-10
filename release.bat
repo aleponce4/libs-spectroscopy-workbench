@@ -18,10 +18,14 @@ echo.
 echo Building executable...
 echo ================================
 
-:: Activate virtual environment if it exists
+:: Activate release virtual environment
 if exist "LIBS_venv\Scripts\activate.bat" (
     echo Activating virtual environment...
     call LIBS_venv\Scripts\activate.bat
+) else (
+    echo Error: LIBS_venv not found. Create it before releasing.
+    pause
+    exit /b 1
 )
 
 python compile.py
@@ -34,7 +38,7 @@ if %errorlevel% neq 0 (
 echo.
 echo Committing changes to git...
 echo ================================
-git add *.py
+git add *.py *.bat
 git commit -m "Release %version%: Update with new features"
 if %errorlevel% neq 0 (
     echo Warning: Git commit may have failed (could be no changes)
@@ -54,7 +58,10 @@ echo ================================
 :: Find the most recent compiled folder using Windows commands
 set newest_folder=
 for /f "delims=" %%i in ('dir "Compiled version\compiled_*" /b /ad /o-d 2^>nul') do (
-    if not defined newest_folder set newest_folder=%%i
+    if not defined newest_folder (
+        echo %%i| findstr /r /c:"_dir$" >nul
+        if errorlevel 1 set newest_folder=%%i
+    )
 )
 
 if "%newest_folder%"=="" (
@@ -112,4 +119,4 @@ echo.
 echo Don't forget to update your README.md download link to:
 echo https://github.com/YOUR_USERNAME/LIBS-Data-Analysis/releases/latest
 echo.
-pause 
+pause
