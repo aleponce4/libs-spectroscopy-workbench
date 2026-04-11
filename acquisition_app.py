@@ -85,6 +85,7 @@ class AcquisitionApp:
         self.plate_progress = None
         self.plate_history = []
         self.current_plate_index = None
+        self._plate_completion_prompt_pending = False
 
         # ─── Build UI ──────────────────────────────────────────────────
         # Graph area (offset from sidebar, same as analysis mode)
@@ -395,6 +396,8 @@ class AcquisitionApp:
             self.correct_nl_var.set(False)
         if hasattr(self, 'discard_plate_shot_btn'):
             self.discard_plate_shot_btn.config(state="disabled")
+        if hasattr(self, 'finish_plate_btn'):
+            self.finish_plate_btn.config(state="disabled")
         if hasattr(self, 'plate_progress_var'):
             self.plate_mode_var.set(False)
             self.configure_plate_btn.config(state="disabled")
@@ -402,6 +405,7 @@ class AcquisitionApp:
             self.plate_progress = None
             self.plate_history = []
             self.current_plate_index = None
+            self._plate_completion_prompt_pending = False
             self._hide_plate_overview()
 
     def on_live_view(self):
@@ -418,6 +422,12 @@ class AcquisitionApp:
         """Arm the hardware trigger and wait for laser pulse.
         If loop-arm is enabled, the worker will automatically re-arm
         after each capture until the user clicks Stop."""
+        if self._plate_requires_reconfigure():
+            messagebox.showinfo(
+                "Configure Next Plate",
+                "Finish configuring the next plate before starting another capture.",
+            )
+            return
         if self.worker:
             self.worker.arm_trigger()
             self.live_btn.config(state="disabled")
@@ -428,6 +438,12 @@ class AcquisitionApp:
 
     def on_test_trigger(self):
         """Fire a test capture using normal mode to verify the full pipeline."""
+        if self._plate_requires_reconfigure():
+            messagebox.showinfo(
+                "Configure Next Plate",
+                "Finish configuring the next plate before running another test capture.",
+            )
+            return
         if self.worker:
             self.worker.test_trigger()
             self.live_btn.config(state="disabled")
@@ -512,10 +528,12 @@ class AcquisitionApp:
                 self.worker.disable_plate_autosave()
             self.configure_plate_btn.config(state="disabled")
             self.discard_plate_shot_btn.config(state="disabled")
+            self.finish_plate_btn.config(state="disabled")
             self.plate_progress_var.set("")
             self.plate_progress = None
             self.plate_history = []
             self.current_plate_index = None
+            self._plate_completion_prompt_pending = False
             self._hide_plate_overview()
 
     def on_configure_plate(self):
@@ -537,6 +555,35 @@ class AcquisitionApp:
         """Discard the latest saved high-throughput plate shot."""
         if self.worker:
             self.worker.discard_last_plate_shot()
+
+    def on_finish_plate_early(self):
+        """Close the current plate early and prompt for the next one."""
+        if not self.plate_progress or self._plate_payload_finished(self.plate_progress):
+            return
+
+        if self._is_acquisition_busy():
+            messagebox.showinfo(
+                "Acquisition Running",
+                "Stop acquisition before finishing the current plate early.",
+            )
+            return
+
+        if not messagebox.askyesno(
+            "Finish Plate Early",
+            "This will mark the remaining wells as skipped and let you configure the next plate.\n\nContinue?",
+            parent=self.root,
+        ):
+            return
+
+        payload = dict(self.plate_progress)
+        payload["closed_early"] = True
+        payload["current_well"] = None
+        payload["can_discard"] = False
+        self._update_plate_progress(payload)
+        self.status_message_var.set("Plate closed early.")
+        if self.worker:
+            self.worker.disable_plate_autosave()
+        self._prompt_for_next_plate()
 
     def on_sample_name_changed(self):
         """Update the sample name in the worker and reset shot index."""
@@ -613,6 +660,12 @@ class AcquisitionApp:
 
     def _is_acquisition_busy(self):
         return bool(self.worker and self.worker.state != "IDLE")
+
+    def _plate_payload_finished(self, payload):
+        return bool(payload and (payload.get("complete") or payload.get("closed_early")))
+
+    def _plate_requires_reconfigure(self):
+        return bool(self.plate_mode_var.get() and self._plate_payload_finished(self.plate_progress))
 
     def _apply_plate_config(self, config):
         if not isinstance(config, PlateAutosaveConfig):
@@ -776,7 +829,7 @@ class AcquisitionApp:
 
         self._update_plate_history_card(payload)
         if payload["current_well"] is None:
-            next_text = "complete"
+            next_text = "finished early" if payload.get("closed_early") else "complete"
         else:
             next_text = f"next {payload['current_well']}"
 
@@ -786,7 +839,13 @@ class AcquisitionApp:
         )
         self._show_plate_overview()
         self._redraw_plate_history()
-        self.discard_plate_shot_btn.config(state="normal" if payload.get("can_discard") else "disabled")
+        finished = self._plate_payload_finished(payload)
+        self.discard_plate_shot_btn.config(
+            state="normal" if payload.get("can_discard") and not finished else "disabled"
+        )
+        self.finish_plate_btn.config(
+            state="normal" if payload.get("saved_shots", 0) and not finished else "disabled"
+        )
 
     def _start_plate_history_card(self, payload):
         if self.current_plate_index is None:
@@ -795,7 +854,7 @@ class AcquisitionApp:
             return
 
         current = self.plate_history[self.current_plate_index]
-        if current.get("complete"):
+        if self._plate_payload_finished(current):
             if self.current_plate_index < len(self.plate_history) - 1:
                 self.current_plate_index += 1
                 self.plate_history[self.current_plate_index] = dict(payload)
@@ -811,20 +870,27 @@ class AcquisitionApp:
             return
         self.plate_history[self.current_plate_index] = dict(payload)
 
-    def _append_next_plate_placeholder(self, payload):
-        if self.current_plate_index is None or not payload.get("complete"):
+    def _prompt_for_next_plate(self):
+        """Offer to configure the next plate after the current one completes."""
+        if not self.plate_autosave_config:
             return
-        if self.current_plate_index < len(self.plate_history) - 1:
+        if self.worker:
+            self.worker.disable_plate_autosave()
+
+        if not messagebox.askyesno(
+            "Plate Complete",
+            "The current plate is complete.\n\nConfigure the next plate now?",
+            parent=self.root,
+        ):
+            self.status_message_var.set("Plate complete. Click Configure Plate to start the next plate.")
             return
 
-        config = PlateAutosaveConfig.from_mapping({
-            "plate_type": payload["plate_type"],
-            "plate_name": payload["plate_name"],
-            "shots_per_well": payload["shots_per_well"],
-            "order_mode": payload["order_mode"],
-        })
-        next_payload = PlateRunState(config).progress_payload()
-        self.plate_history.append(next_payload)
+        config = self._ask_plate_settings()
+        if config is None:
+            self.status_message_var.set("Plate complete. Click Configure Plate to start the next plate.")
+            return
+
+        self._apply_plate_config(config)
 
     def _show_plate_overview(self):
         if not self.plate_overview_frame.winfo_ismapped():
@@ -842,8 +908,10 @@ class AcquisitionApp:
 
         for index, payload in enumerate(self.plate_history):
             title = f"{payload['plate_name']} - Plate {index + 1}"
-            if index == self.current_plate_index and not payload.get("complete"):
+            if index == self.current_plate_index and not self._plate_payload_finished(payload):
                 title += " (current)"
+            elif payload.get("closed_early"):
+                title += " (finished early)"
             elif payload.get("complete"):
                 title += " (done)"
             elif self.current_plate_index is not None and index > self.current_plate_index:
@@ -1080,6 +1148,9 @@ class AcquisitionApp:
                     self.test_trigger_btn.config(state="normal")
                     self.stop_btn.config(state="disabled")
                     self.worker_state_var.set("State: IDLE")
+                    if self._plate_completion_prompt_pending:
+                        self._plate_completion_prompt_pending = False
+                        self.root.after(0, self._prompt_for_next_plate)
 
                 elif msg_type == AcquisitionMessage.SAVE_COMPLETE:
                     self.status_message_var.set(f"Saved: {os.path.basename(data)}")
@@ -1095,9 +1166,8 @@ class AcquisitionApp:
 
                 elif msg_type == AcquisitionMessage.PLATE_COMPLETE:
                     self._update_plate_progress(data)
-                    self._append_next_plate_placeholder(data)
-                    self._redraw_plate_history(focus_index=len(self.plate_history) - 1)
                     self.status_message_var.set("Plate complete.")
+                    self._plate_completion_prompt_pending = True
 
                 elif msg_type == AcquisitionMessage.STOPPED:
                     self.worker_state_var.set("State: STOPPED")

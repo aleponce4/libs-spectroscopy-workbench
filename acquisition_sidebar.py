@@ -204,6 +204,9 @@ def create_acquisition_sidebar(app):
     save_frame.grid(row=4, column=0, padx=20, pady=5, sticky="ew")
 
     # Auto-save toggle
+    save_frame.columnconfigure(0, weight=1)
+    save_frame.columnconfigure(1, weight=1)
+
     app.auto_save_var = tk.BooleanVar(value=True)
     auto_save_check = ttk.Checkbutton(save_frame, text="Auto-save on trigger",
                                        variable=app.auto_save_var,
@@ -261,11 +264,19 @@ def create_acquisition_sidebar(app):
 
     app.discard_plate_shot_btn = ttk.Button(
         save_frame,
-        text="Discard Last Shot",
+        text="Discard Shot",
         command=app.on_discard_last_plate_shot,
         state="disabled",
     )
-    app.discard_plate_shot_btn.grid(row=7, column=0, columnspan=2, padx=5, pady=(3, 5), sticky="ew")
+    app.discard_plate_shot_btn.grid(row=7, column=0, padx=(5, 3), pady=(3, 5), sticky="ew")
+
+    app.finish_plate_btn = ttk.Button(
+        save_frame,
+        text="Finish Plate",
+        command=app.on_finish_plate_early,
+        state="disabled",
+    )
+    app.finish_plate_btn.grid(row=7, column=1, padx=(3, 5), pady=(3, 5), sticky="ew")
 
     # ─── Actions ───────────────────────────────────────────────────────
     action_frame = ttk.LabelFrame(app.sidebar_frame, text="Actions", padding=5)
