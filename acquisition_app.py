@@ -638,20 +638,33 @@ class AcquisitionApp:
 
         dlg = tk.Toplevel(self.root)
         dlg.title("High-Throughput Plate Settings")
-        dlg.resizable(False, False)
+        dlg.resizable(True, True)
         dlg.grab_set()
         dlg.transient(self.root)
 
         dlg.update_idletasks()
+        screen_w = dlg.winfo_screenwidth()
+        screen_h = dlg.winfo_screenheight()
         pw = self.root.winfo_width()
         ph = self.root.winfo_height()
         px = self.root.winfo_x()
         py = self.root.winfo_y()
-        dw, dh = 720, 520
-        dlg.geometry(f"{dw}x{dh}+{px + (pw - dw) // 2}+{py + (ph - dh) // 2}")
+        desired_w, desired_h = 720, 520
+        min_w, min_h = 640, 460
+        dw = max(min_w, min(desired_w, screen_w - 80))
+        dh = max(min_h, min(desired_h, screen_h - 120))
+        dx = px + max((pw - dw) // 2, 0)
+        dy = py + max((ph - dh) // 2, 0)
+        dx = max(20, min(dx, screen_w - dw - 20))
+        dy = max(20, min(dy, screen_h - dh - 40))
+        dlg.minsize(min_w, min_h)
+        dlg.geometry(f"{dw}x{dh}+{dx}+{dy}")
 
         main = ttk.Frame(dlg, padding=14)
         main.pack(fill=tk.BOTH, expand=True)
+        main.columnconfigure(0, weight=0)
+        main.columnconfigure(1, weight=1)
+        main.rowconfigure(1, weight=1)
 
         ttk.Label(
             main,
@@ -700,6 +713,8 @@ class AcquisitionApp:
 
         preview_frame = ttk.LabelFrame(main, text="Plate Preview", padding=10)
         preview_frame.grid(row=1, column=1, sticky="nsew")
+        preview_frame.columnconfigure(0, weight=1)
+        preview_frame.rowconfigure(0, weight=1)
         preview_canvas = tk.Canvas(
             preview_frame,
             width=420,
@@ -708,7 +723,7 @@ class AcquisitionApp:
             highlightthickness=1,
             highlightbackground="#C8D0DA",
         )
-        preview_canvas.pack(fill=tk.BOTH, expand=True)
+        preview_canvas.grid(row=0, column=0, sticky="nsew")
 
         button_bar = ttk.Frame(main)
         button_bar.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(14, 0))

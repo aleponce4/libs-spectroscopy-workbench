@@ -381,7 +381,13 @@ class AcquisitionWorker(threading.Thread):
                         f"Test capture #{self._shot_index} — pipeline OK")
 
             if self.auto_save_enabled:
-                self._auto_save(wavelengths, intensities, consume_plate=False)
+                self._auto_save(
+                    wavelengths,
+                    intensities,
+                    consume_plate=self._plate_mode_enabled(),
+                )
+                if self._is_plate_complete():
+                    self._send(AcquisitionMessage.STATUS, "Plate complete.")
 
         except Exception as e:
             self._send(AcquisitionMessage.ERROR, f"Test trigger failed: {e}")
@@ -457,6 +463,10 @@ class AcquisitionWorker(threading.Thread):
     def _is_plate_complete(self) -> bool:
         with self._plate_lock:
             return bool(self._plate_run_state and self._plate_run_state.is_complete)
+
+    def _plate_mode_enabled(self) -> bool:
+        with self._plate_lock:
+            return self._plate_run_state is not None
 
     # ─── Messaging ─────────────────────────────────────────────────────
 
