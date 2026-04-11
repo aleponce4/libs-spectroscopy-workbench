@@ -14,6 +14,7 @@ import logging
 import subprocess
 import json
 import re
+import sys
 from abc import ABC, abstractmethod
 
 logger = logging.getLogger(__name__)
@@ -609,6 +610,178 @@ def _build_trigger_map_from_seabreeze(spec) -> dict[str, int]:
     return trigger_map
 
 
+_SEABREEZE_BACKEND_ORDER = ("cseabreeze", "pyseabreeze")
+_SEABREEZE_PROBE_TIMEOUT_SEC = 15
+
+
+def _probe_seabreeze_backend(backend: str) -> dict:
+    """
+    Probe a seabreeze backend in a clean subprocess.
+
+    seabreeze cannot reliably switch backends after touching device discovery,
+    so probing is isolated in a subprocess and returns structured JSON.
+    """
+    probe = {
+        "backend": backend,
+        "use_ok": False,
+        "list_ok": False,
+        "device_count": 0,
+        "devices": [],
+        "failure": None,
+    }
+
+    probe_script = (
+        "import json, sys\n"
+        "result = {\n"
+        "    'backend': sys.argv[1],\n"
+        "    'use_ok': False,\n"
+        "    'list_ok': False,\n"
+        "    'device_count': 0,\n"
+        "    'devices': [],\n"
+        "    'failure': None,\n"
+        "}\n"
+        "try:\n"
+        "    import seabreeze\n"
+        "    seabreeze.use(result['backend'])\n"
+        "    result['use_ok'] = True\n"
+        "    from seabreeze.spectrometers import list_devices\n"
+        "    devices = list_devices()\n"
+        "    result['list_ok'] = True\n"
+        "    result['device_count'] = len(devices)\n"
+        "    for i, dev in enumerate(devices):\n"
+        "        try:\n"
+        "            model = dev.model\n"
+        "        except Exception:\n"
+        "            model = 'Unknown'\n"
+        "        try:\n"
+        "            serial = dev.serial_number\n"
+        "        except Exception:\n"
+        "            serial = f'device_{i}'\n"
+        "        result['devices'].append({\n"
+        "            'index': i,\n"
+        "            'model': model,\n"
+        "            'serial': serial,\n"
+        "        })\n"
+        "    if result['device_count'] == 0:\n"
+        "        result['failure'] = 'loaded OK but found 0 devices'\n"
+        "except Exception as exc:\n"
+        "    result['failure'] = str(exc)\n"
+        "print(json.dumps(result))\n"
+    )
+
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", probe_script, backend],
+            capture_output=True,
+            text=True,
+            timeout=_SEABREEZE_PROBE_TIMEOUT_SEC,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired:
+        probe["failure"] = "probe timed out"
+        return probe
+    except Exception as e:
+        probe["failure"] = f"probe error: {e}"
+        return probe
+
+    output_lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    for line in reversed(output_lines):
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            probe.update(parsed)
+            return probe
+
+    stderr = completed.stderr.strip()
+    if stderr:
+        probe["failure"] = stderr
+    elif completed.returncode != 0:
+        probe["failure"] = f"probe exited with code {completed.returncode}"
+    else:
+        probe["failure"] = "probe returned no JSON result"
+    return probe
+
+
+def _describe_seabreeze_probe(probe: dict) -> str:
+    """Render a concise human-readable summary for a backend probe."""
+    if probe.get("use_ok") and probe.get("list_ok"):
+        count = int(probe.get("device_count", 0))
+        if count > 0:
+            return f"found {count} device(s)"
+        return "loaded OK but found 0 devices"
+
+    failure = str(probe.get("failure") or "").strip()
+    if failure:
+        return failure
+    if probe.get("use_ok"):
+        return "loaded OK but list_devices() failed"
+    return "failed to load"
+
+
+def _select_seabreeze_backend() -> dict:
+    """
+    Choose the seabreeze backend.
+
+    Prefer the first backend that both loads and enumerates at least one device.
+    If neither backend finds devices, fall back to the first backend that loaded.
+    """
+    probes: list[dict] = []
+    selected_probe = None
+    first_loadable_probe = None
+
+    for backend in _SEABREEZE_BACKEND_ORDER:
+        probe = _probe_seabreeze_backend(backend)
+        probes.append(probe)
+
+        if probe.get("use_ok") and first_loadable_probe is None:
+            first_loadable_probe = probe
+
+        if probe.get("use_ok") and probe.get("list_ok") and int(probe.get("device_count", 0)) > 0:
+            selected_probe = probe
+            break
+
+    if selected_probe is None:
+        selected_probe = first_loadable_probe
+
+    selected_backend = selected_probe["backend"] if selected_probe else None
+
+    failure_reason = None
+    if selected_probe is None:
+        failure_reason = "; ".join(
+            f"{probe['backend']}: {_describe_seabreeze_probe(probe)}"
+            for probe in probes
+        )
+    else:
+        selected_has_devices = (
+            selected_probe.get("use_ok")
+            and selected_probe.get("list_ok")
+            and int(selected_probe.get("device_count", 0)) > 0
+        )
+
+        if selected_has_devices:
+            prior_probes = [probe for probe in probes if probe["backend"] != selected_backend]
+            if prior_probes:
+                failure_reason = "; ".join(
+                    f"{probe['backend']}: {_describe_seabreeze_probe(probe)}"
+                    for probe in prior_probes
+                )
+                failure_reason = f"{failure_reason}; fell back to {selected_backend}"
+        else:
+            failure_reason = "; ".join(
+                f"{probe['backend']}: {_describe_seabreeze_probe(probe)}"
+                for probe in probes
+            )
+
+    return {
+        "selected_backend": selected_backend,
+        "selected_probe": selected_probe,
+        "probes": probes,
+        "failure_reason": failure_reason,
+    }
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  SpectrometerModule — main public interface
 # ═══════════════════════════════════════════════════════════════════════
@@ -1050,32 +1223,34 @@ class SpectrometerModule(SpectrometerBase):
             )
             return report
 
-        # 3. Try cseabreeze, then pyseabreeze
-        sb_backend = None
-        c_fail = None
-        py_fail = None
-        try:
-            seabreeze.use("cseabreeze")
-            sb_backend = "cseabreeze"
-        except Exception as e:
-            c_fail = str(e)
-            try:
-                seabreeze.use("pyseabreeze")
-                sb_backend = "pyseabreeze"
-            except Exception as e2:
-                py_fail = str(e2)
+        # 3. Select the backend using subprocess-based probes
+        selection = _select_seabreeze_backend()
+        sb_backend = selection["selected_backend"]
+        selected_probe = selection["selected_probe"] or {}
 
         report["seabreeze_backend"] = sb_backend
+        report["seabreeze_backend_fail_reason"] = selection["failure_reason"]
+        if selected_probe.get("devices"):
+            report["seabreeze_devices"] = [
+                {
+                    "index": dev.get("index", i),
+                    "model": dev.get("model", "Unknown"),
+                    "serial": dev.get("serial", f"device_{i}"),
+                }
+                for i, dev in enumerate(selected_probe["devices"])
+            ]
+
         if sb_backend is None:
-            report["seabreeze_backend_fail_reason"] = (
-                f"cseabreeze: {c_fail}\npyseabreeze: {py_fail}"
-            )
             report["notes"].append("Neither seabreeze backend could be loaded.")
             return report
-        elif c_fail:
-            report["seabreeze_backend_fail_reason"] = (
-                f"cseabreeze failed ({c_fail}), fell back to pyseabreeze"
+
+        try:
+            seabreeze.use(sb_backend)
+        except Exception as e:
+            report["notes"].append(
+                f"Selected seabreeze backend '{sb_backend}' could not be activated: {e}"
             )
+            return report
 
         # 4. Enumerate devices via seabreeze
         from seabreeze.spectrometers import list_devices, Spectrometer
@@ -1086,6 +1261,8 @@ class SpectrometerModule(SpectrometerBase):
             report["notes"].append(f"list_devices() error: {e}")
             raw_devices = []
 
+        if raw_devices:
+            report["seabreeze_devices"] = []
         for i, dev in enumerate(raw_devices):
             try:
                 m = dev.model
@@ -1136,12 +1313,21 @@ class SpectrometerModule(SpectrometerBase):
             return
         try:
             import seabreeze
-            try:
-                seabreeze.use("cseabreeze")
-                logger.info("Using cseabreeze backend")
-            except Exception:
-                seabreeze.use("pyseabreeze")
-                logger.info("cseabreeze unavailable, using pyseabreeze backend")
+            selection = _select_seabreeze_backend()
+            backend = selection["selected_backend"]
+            if backend is None:
+                reason = selection["failure_reason"] or "No seabreeze backend could be loaded."
+                raise SpectrometerError(
+                    "Neither seabreeze backend could be loaded.\n"
+                    f"{reason}"
+                )
+
+            seabreeze.use(backend)
+            reason = selection["failure_reason"]
+            if reason:
+                logger.info(f"Using {backend} backend ({reason})")
+            else:
+                logger.info(f"Using {backend} backend")
             self._sb = seabreeze
         except ImportError:
             raise SpectrometerError(

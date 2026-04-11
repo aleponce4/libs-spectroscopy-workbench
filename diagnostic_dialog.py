@@ -49,8 +49,14 @@ class DiagnosticDialog:
         self.dlg.resizable(True, True)
         self.dlg.grab_set()
         self.dlg.transient(parent)
-        self.dlg.minsize(640, 420)
-        self.dlg.geometry("720x560")
+        screen_w = self.dlg.winfo_screenwidth()
+        screen_h = self.dlg.winfo_screenheight()
+        min_w, min_h = 760, 560
+        desired_w, desired_h = 900, 700
+        dlg_w = max(min_w, min(desired_w, screen_w - 80))
+        dlg_h = max(min_h, min(desired_h, screen_h - 120))
+        self.dlg.minsize(min_w, min_h)
+        self.dlg.geometry(f"{dlg_w}x{dlg_h}")
         self._center_on_parent()
 
         # ── Top frame: reason banner ───────────────────────────────────
