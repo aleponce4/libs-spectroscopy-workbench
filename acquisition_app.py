@@ -78,6 +78,7 @@ class AcquisitionApp:
         self.current_wavelengths = None
         self.current_intensities = None
         self._highlight_line = None
+        self._highlight_after_id = None
 
         # Data to hand off to Analysis mode
         self._handoff_data = None
@@ -95,6 +96,7 @@ class AcquisitionApp:
         from acquisition_graph import create_acquisition_graph
         self.graph_frame, self.fig, self.ax, self.canvas, self.live_line = \
             create_acquisition_graph(self.graph_container)
+        self._highlight_line = self.live_line
         self.graph_frame.pack_forget()
         self.graph_container.grid_rowconfigure(0, weight=1)
         self.graph_container.grid_rowconfigure(1, weight=0)
@@ -456,6 +458,7 @@ class AcquisitionApp:
         """Stop acquisition (live view or disarm trigger / loop)."""
         if self.worker:
             self.worker.go_idle()
+            self._remove_highlight()
             self.live_btn.config(state="normal")
             self._update_arm_btn_state()
             self.test_trigger_btn.config(state="normal")
@@ -1122,12 +1125,13 @@ class AcquisitionApp:
                     shot_idx = data["shot_index"]
                     self.shot_count_var.set(f"Shots: {shot_idx}")
                     # Visual feedback
-                    self._highlight_line = highlight_captured_spectrum(
-                        self.ax, self.canvas, data["wavelengths"],
+                    self._cancel_highlight_timer()
+                    highlight_captured_spectrum(
+                        self.ax, self.canvas, self.live_line, data["wavelengths"],
                         data["intensities"], shot_idx
                     )
                     # Remove highlight after 2 seconds
-                    self.root.after(2000, lambda: self._remove_highlight())
+                    self._highlight_after_id = self.root.after(2000, self._remove_highlight)
 
                     # The worker automatically re-arms after each capture.
                     # While it stays in ARMED state, keep Stop enabled.
@@ -1142,6 +1146,7 @@ class AcquisitionApp:
                         self.worker_state_var.set("State: IDLE")
 
                 elif msg_type == AcquisitionMessage.IDLE:
+                    self._remove_highlight()
                     # Worker returned to idle — restore button state
                     self.live_btn.config(state="normal")
                     self._update_arm_btn_state()
@@ -1170,6 +1175,7 @@ class AcquisitionApp:
                     self._plate_completion_prompt_pending = True
 
                 elif msg_type == AcquisitionMessage.STOPPED:
+                    self._remove_highlight()
                     self.worker_state_var.set("State: STOPPED")
 
         except queue.Empty:
@@ -1179,12 +1185,21 @@ class AcquisitionApp:
         if self.worker:
             self.root.after(50, self._poll_queue)
 
+    def _cancel_highlight_timer(self):
+        """Cancel any pending highlight clear callback."""
+        if self._highlight_after_id is not None:
+            try:
+                self.root.after_cancel(self._highlight_after_id)
+            except tk.TclError:
+                pass
+            self._highlight_after_id = None
+
     def _remove_highlight(self):
-        """Remove the capture highlight line."""
+        """Restore the live line after a capture highlight."""
+        self._cancel_highlight_timer()
         if self._highlight_line:
             from acquisition_graph import clear_highlight
             clear_highlight(self.ax, self.canvas, self._highlight_line)
-            self._highlight_line = None
 
     # ═══════════════════════════════════════════════════════════════════
     #  Brand selection dialog
@@ -1252,6 +1267,7 @@ class AcquisitionApp:
     def _cleanup_and_quit(self):
         """Stop the worker, disconnect the spectrometer, and exit mainloop.
         Uses quit() so the shared root stays alive for Analysis mode handoff."""
+        self._remove_highlight()
         if self.worker:
             self.worker.stop()
             self.worker.join(timeout=3)
@@ -1270,6 +1286,7 @@ class AcquisitionApp:
     def _cleanup_and_close(self):
         """Stop the worker, disconnect the spectrometer, and exit.
         Used when the user closes the window without handoff."""
+        self._remove_highlight()
         if self.worker:
             self.worker.stop()
             self.worker.join(timeout=3)

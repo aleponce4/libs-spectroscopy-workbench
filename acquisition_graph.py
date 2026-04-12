@@ -173,7 +173,7 @@ def update_title(ax, canvas, title_text):
     canvas.draw_idle()
 
 
-def highlight_captured_spectrum(ax, canvas, wavelengths, intensities, shot_index):
+def _legacy_highlight_captured_spectrum(ax, canvas, wavelengths, intensities, shot_index):
     """
     Briefly show the captured spectrum with a highlight effect.
     Used after a triggered capture to visually confirm the shot.
@@ -188,7 +188,7 @@ def highlight_captured_spectrum(ax, canvas, wavelengths, intensities, shot_index
     return highlight_line
 
 
-def clear_highlight(ax, canvas, highlight_line):
+def _legacy_clear_highlight(ax, canvas, highlight_line):
     """
     Remove the capture highlight line and restore the previous title.
     """
@@ -197,5 +197,44 @@ def clear_highlight(ax, canvas, highlight_line):
     except (ValueError, AttributeError):
         pass
     # Restore title saved by highlight_captured_spectrum()
+    ax.set_title(getattr(ax, '_pre_capture_title', 'Live Spectrum'))
+    canvas.draw_idle()
+
+
+def highlight_captured_spectrum(ax, canvas, live_line, wavelengths, intensities, shot_index):
+    """
+    Briefly show the captured spectrum with a highlight effect.
+    Used after a triggered capture to visually confirm the shot.
+    """
+    # Keep the live line aligned with the captured data while we flash its style.
+    live_line.set_xdata(wavelengths)
+    live_line.set_ydata(intensities)
+
+    # Preserve the original live title across rapid repeated captures.
+    if not getattr(ax, '_capture_highlight_active', False):
+        ax._pre_capture_title = ax.get_title()
+    ax._capture_highlight_active = True
+
+    # Reuse the live line so repeated triggers cannot leave stale overlays behind.
+    if not hasattr(live_line, '_normal_color'):
+        live_line._normal_color = live_line.get_color()
+        live_line._normal_linewidth = live_line.get_linewidth()
+        live_line._normal_alpha = live_line.get_alpha() if live_line.get_alpha() is not None else 1.0
+
+    live_line.set_color('#FF4444')
+    live_line.set_linewidth(1.2)
+    live_line.set_alpha(0.8)
+    ax.set_title(f"Captured - Shot #{shot_index}")
+    canvas.draw_idle()
+
+
+def clear_highlight(ax, canvas, live_line):
+    """
+    Restore the live line style after a capture highlight.
+    """
+    live_line.set_color(getattr(live_line, '_normal_color', '#0078D4'))
+    live_line.set_linewidth(getattr(live_line, '_normal_linewidth', 0.8))
+    live_line.set_alpha(getattr(live_line, '_normal_alpha', 1.0))
+    ax._capture_highlight_active = False
     ax.set_title(getattr(ax, '_pre_capture_title', 'Live Spectrum'))
     canvas.draw_idle()
