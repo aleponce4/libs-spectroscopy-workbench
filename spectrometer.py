@@ -614,6 +614,53 @@ _SEABREEZE_BACKEND_ORDER = ("cseabreeze", "pyseabreeze")
 _SEABREEZE_PROBE_TIMEOUT_SEC = 15
 
 
+def _collect_seabreeze_probe(backend: str) -> dict:
+    """Probe a seabreeze backend in-process and return structured results."""
+    result = {
+        "backend": backend,
+        "use_ok": False,
+        "list_ok": False,
+        "device_count": 0,
+        "devices": [],
+        "failure": None,
+    }
+
+    try:
+        import seabreeze
+
+        seabreeze.use(backend)
+        result["use_ok"] = True
+
+        from seabreeze.spectrometers import list_devices
+
+        devices = list_devices()
+        result["list_ok"] = True
+        result["device_count"] = len(devices)
+
+        for i, dev in enumerate(devices):
+            try:
+                model = dev.model
+            except Exception:
+                model = "Unknown"
+            try:
+                serial = dev.serial_number
+            except Exception:
+                serial = f"device_{i}"
+            result["devices"].append({
+                "index": i,
+                "model": model,
+                "serial": serial,
+            })
+
+        if result["device_count"] == 0:
+            result["failure"] = "loaded OK but found 0 devices"
+
+    except Exception as exc:
+        result["failure"] = str(exc)
+
+    return result
+
+
 def _probe_seabreeze_backend(backend: str) -> dict:
     """
     Probe a seabreeze backend in a clean subprocess.
@@ -630,48 +677,20 @@ def _probe_seabreeze_backend(backend: str) -> dict:
         "failure": None,
     }
 
-    probe_script = (
-        "import json, sys\n"
-        "result = {\n"
-        "    'backend': sys.argv[1],\n"
-        "    'use_ok': False,\n"
-        "    'list_ok': False,\n"
-        "    'device_count': 0,\n"
-        "    'devices': [],\n"
-        "    'failure': None,\n"
-        "}\n"
-        "try:\n"
-        "    import seabreeze\n"
-        "    seabreeze.use(result['backend'])\n"
-        "    result['use_ok'] = True\n"
-        "    from seabreeze.spectrometers import list_devices\n"
-        "    devices = list_devices()\n"
-        "    result['list_ok'] = True\n"
-        "    result['device_count'] = len(devices)\n"
-        "    for i, dev in enumerate(devices):\n"
-        "        try:\n"
-        "            model = dev.model\n"
-        "        except Exception:\n"
-        "            model = 'Unknown'\n"
-        "        try:\n"
-        "            serial = dev.serial_number\n"
-        "        except Exception:\n"
-        "            serial = f'device_{i}'\n"
-        "        result['devices'].append({\n"
-        "            'index': i,\n"
-        "            'model': model,\n"
-        "            'serial': serial,\n"
-        "        })\n"
-        "    if result['device_count'] == 0:\n"
-        "        result['failure'] = 'loaded OK but found 0 devices'\n"
-        "except Exception as exc:\n"
-        "    result['failure'] = str(exc)\n"
-        "print(json.dumps(result))\n"
-    )
+    frozen = bool(getattr(sys, "frozen", False))
+    if frozen:
+        command = [sys.executable, "--seabreeze-probe", backend]
+    else:
+        probe_script = (
+            "import json, sys\n"
+            "from spectrometer import _collect_seabreeze_probe\n"
+            "print(json.dumps(_collect_seabreeze_probe(sys.argv[1])))\n"
+        )
+        command = [sys.executable, "-c", probe_script, backend]
 
     try:
         completed = subprocess.run(
-            [sys.executable, "-c", probe_script, backend],
+            command,
             capture_output=True,
             text=True,
             timeout=_SEABREEZE_PROBE_TIMEOUT_SEC,

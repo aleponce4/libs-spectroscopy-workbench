@@ -4,6 +4,7 @@
 # Importing necessary modules
 import sys
 import os
+import json
 import traceback
 import logging
 
@@ -40,6 +41,12 @@ if getattr(sys, 'frozen', False):
 
     # Set the environment variable for the SV_TTK_THEME
     os.environ['SV_TTK_THEME'] = os.path.join(application_path, 'sv_ttk', 'theme')
+
+
+if len(sys.argv) >= 3 and sys.argv[1] == "--seabreeze-probe":
+    from spectrometer import _collect_seabreeze_probe
+    print(json.dumps(_collect_seabreeze_probe(sys.argv[2])))
+    sys.exit(0)
 
 
 def main():
