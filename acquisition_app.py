@@ -349,10 +349,6 @@ class AcquisitionApp:
         self.worker.auto_save_enabled = self.auto_save_var.get()
         self.worker.save_directory = self.save_dir_var.get()
         self.worker.sample_name = self.sample_name_var.get()
-        if self.plate_mode_var.get() and self._pending_plate_run_state is not None:
-            self.worker.resume_plate_autosave(self._pending_plate_run_state)
-        elif self.plate_mode_var.get() and self.plate_autosave_config is not None:
-            self.worker.set_plate_autosave_config(self.plate_autosave_config)
         self.worker.start()
 
         # Start polling the message queue
