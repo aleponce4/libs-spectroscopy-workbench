@@ -8,16 +8,22 @@
 # All backends are lazy-loaded: the third-party library is imported only inside
 # connect(), so the analysis side of the app never needs any spectrometer driver.
 
-import numpy as np
-import time
-import logging
-import subprocess
+import importlib.util
 import json
+import logging
+import os
+from pathlib import Path
 import re
+import subprocess
 import sys
+import time
+import numpy as np
 from abc import ABC, abstractmethod
 
 logger = logging.getLogger(__name__)
+
+_LIBUSB_DLL_NAME = "libusb-1.0.dll"
+_DLL_DIRECTORY_HANDLES = []
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -614,6 +620,80 @@ _SEABREEZE_BACKEND_ORDER = ("cseabreeze", "pyseabreeze")
 _SEABREEZE_PROBE_TIMEOUT_SEC = 15
 
 
+def _iter_libusb_candidate_dirs() -> list[Path]:
+    """Return candidate directories that may contain libusb-1.0.dll."""
+    candidates: list[Path] = []
+
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass))
+        candidates.append(Path(sys.executable).resolve().parent)
+
+    spec = importlib.util.find_spec("libusb_package")
+    if spec and spec.origin:
+        candidates.append(Path(spec.origin).resolve().parent)
+
+    repo_root = Path(__file__).resolve().parent
+    candidates.append(Path(sys.prefix) / "Lib" / "site-packages" / "libusb_package")
+    candidates.append(Path(sys.base_prefix) / "Lib" / "site-packages" / "libusb_package")
+    candidates.append(repo_root / "LIBS_venv" / "Lib" / "site-packages" / "libusb_package")
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            resolved = candidate
+        key = str(resolved).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(resolved)
+    return deduped
+
+
+def _prepare_libusb_runtime(backend: str) -> list[str]:
+    """
+    Make libusb discoverable before activating pyseabreeze.
+
+    Returns the directories that were confirmed to contain libusb-1.0.dll.
+    """
+    if backend != "pyseabreeze":
+        return []
+
+    confirmed_dirs: list[str] = []
+    existing_path_entries = {
+        entry.strip().lower()
+        for entry in os.environ.get("PATH", "").split(os.pathsep)
+        if entry.strip()
+    }
+
+    for candidate_dir in _iter_libusb_candidate_dirs():
+        dll_path = candidate_dir / _LIBUSB_DLL_NAME
+        if not dll_path.is_file():
+            continue
+
+        candidate_str = str(candidate_dir)
+        confirmed_dirs.append(candidate_str)
+
+        if hasattr(os, "add_dll_directory"):
+            try:
+                _DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(candidate_str))
+            except (FileNotFoundError, OSError):
+                pass
+
+        if candidate_str.lower() not in existing_path_entries:
+            current_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = (
+                candidate_str if not current_path else candidate_str + os.pathsep + current_path
+            )
+            existing_path_entries.add(candidate_str.lower())
+
+    return confirmed_dirs
+
+
 def _collect_seabreeze_probe(backend: str) -> dict:
     """Probe a seabreeze backend in-process and return structured results."""
     result = {
@@ -626,6 +706,10 @@ def _collect_seabreeze_probe(backend: str) -> dict:
     }
 
     try:
+        runtime_dirs = _prepare_libusb_runtime(backend)
+        if backend == "pyseabreeze" and not runtime_dirs:
+            logger.debug("No libusb runtime directory found before probing pyseabreeze")
+
         import seabreeze
 
         seabreeze.use(backend)
@@ -1264,6 +1348,7 @@ class SpectrometerModule(SpectrometerBase):
             return report
 
         try:
+            _prepare_libusb_runtime(sb_backend)
             seabreeze.use(sb_backend)
         except Exception as e:
             report["notes"].append(
@@ -1341,6 +1426,7 @@ class SpectrometerModule(SpectrometerBase):
                     f"{reason}"
                 )
 
+            _prepare_libusb_runtime(backend)
             seabreeze.use(backend)
             reason = selection["failure_reason"]
             if reason:

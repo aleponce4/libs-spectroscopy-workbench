@@ -30,6 +30,53 @@ os.makedirs(output_dir_onedir, exist_ok=True)
 # Use the project release virtual environment.
 python_path = os.path.join("LIBS_venv", "Scripts", "python.exe")
 
+
+def find_release_libusb_dll() -> str:
+    """Locate libusb-1.0.dll inside the release virtual environment."""
+    probe_script = (
+        "from pathlib import Path\n"
+        "import libusb_package\n"
+        "dll = Path(libusb_package.__file__).resolve().parent / 'libusb-1.0.dll'\n"
+        "print(dll if dll.is_file() else '')\n"
+    )
+
+    try:
+        result = subprocess.run(
+            [python_path, "-c", probe_script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            "LIBS_venv Python was not found. Build releases from the configured release virtual environment."
+        ) from exc
+
+    dll_path = ""
+    for line in reversed(result.stdout.splitlines()):
+        candidate = line.strip()
+        if candidate:
+            dll_path = candidate
+            break
+
+    if result.returncode != 0 or not dll_path or not os.path.isfile(dll_path):
+        fallback = os.path.abspath(
+            os.path.join("LIBS_venv", "Lib", "site-packages", "libusb_package", "libusb-1.0.dll")
+        )
+        if os.path.isfile(fallback):
+            return fallback
+
+        stderr = result.stderr.strip()
+        detail = f" ({stderr})" if stderr else ""
+        raise FileNotFoundError(
+            "Could not find libusb-1.0.dll in LIBS_venv. "
+            "Install the release dependency with: "
+            r"LIBS_venv\Scripts\python.exe -m pip install libusb-package"
+            f"{detail}"
+        )
+
+    return os.path.abspath(dll_path)
+
 # Comprehensive hidden imports (based on systematic analysis)
 hidden_imports = [
     # Standard library modules that are sometimes missing (fixes PyInstaller bootstrap)
@@ -56,12 +103,14 @@ hidden_imports = [
     
     # Additional imports for robustness
     "pkg_resources", "openpyxl", "xlsxwriter", "certifi", "urllib3",
-    
+
     # Acquisition mode modules
     "seabreeze", "seabreeze.spectrometers", "usb", "usb.core", "usb.backend",
     "mode_launcher", "acquisition_app", "acquisition_graph", "acquisition_sidebar",
     "acquisition_worker", "plate_autosave", "spectrometer", "queue", "threading"
 ]
+
+libusb_dll_path = find_release_libusb_dll()
 
 # Build the command for PyInstaller
 command = [
@@ -103,7 +152,8 @@ command = [
     # Add Tcl/Tk libraries so init.tcl is found at runtime
     f"--add-data={tcl_library_path};lib/tcl8.6",
     f"--add-data={tk_library_path};lib/tk8.6",
-    
+    f"--add-binary={libusb_dll_path};.",
+
     # Set name to LIBS
     "--name=LIBS",
     main_script
