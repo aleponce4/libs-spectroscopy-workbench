@@ -16,6 +16,7 @@ import threading
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 from plate_autosave import (
     ORDER_COLUMN,
+    discover_resumable_plate_runs,
     ORDER_LABELS,
     ORDER_ROW,
     PLATE_FORMATS,
@@ -87,6 +88,7 @@ class AcquisitionApp:
         self.plate_history = []
         self.current_plate_index = None
         self._plate_completion_prompt_pending = False
+        self._pending_plate_run_state = None
 
         # ─── Build UI ──────────────────────────────────────────────────
         # Graph area (offset from sidebar, same as analysis mode)
@@ -347,7 +349,9 @@ class AcquisitionApp:
         self.worker.auto_save_enabled = self.auto_save_var.get()
         self.worker.save_directory = self.save_dir_var.get()
         self.worker.sample_name = self.sample_name_var.get()
-        if self.plate_mode_var.get() and self.plate_autosave_config is not None:
+        if self.plate_mode_var.get() and self._pending_plate_run_state is not None:
+            self.worker.resume_plate_autosave(self._pending_plate_run_state)
+        elif self.plate_mode_var.get() and self.plate_autosave_config is not None:
             self.worker.set_plate_autosave_config(self.plate_autosave_config)
         self.worker.start()
 
@@ -408,6 +412,7 @@ class AcquisitionApp:
             self.plate_history = []
             self.current_plate_index = None
             self._plate_completion_prompt_pending = False
+            self._pending_plate_run_state = None
             self._hide_plate_overview()
 
     def on_live_view(self):
@@ -537,6 +542,7 @@ class AcquisitionApp:
             self.plate_history = []
             self.current_plate_index = None
             self._plate_completion_prompt_pending = False
+            self._pending_plate_run_state = None
             self._hide_plate_overview()
 
     def on_configure_plate(self):
@@ -548,10 +554,13 @@ class AcquisitionApp:
             )
             return False
 
-        config = self._ask_plate_settings()
-        if config is None:
+        selection = self._ask_plate_settings()
+        if selection is None:
             return False
-        self._apply_plate_config(config)
+        if isinstance(selection, PlateRunState):
+            self._apply_resumed_plate_state(selection)
+        else:
+            self._apply_plate_config(selection)
         return True
 
     def on_discard_last_plate_shot(self):
@@ -585,7 +594,8 @@ class AcquisitionApp:
         self._update_plate_progress(payload)
         self.status_message_var.set("Plate closed early.")
         if self.worker:
-            self.worker.disable_plate_autosave()
+            self.worker.close_plate_run_early()
+        self._pending_plate_run_state = None
         self._prompt_for_next_plate()
 
     def on_sample_name_changed(self):
@@ -679,6 +689,7 @@ class AcquisitionApp:
         self.configure_plate_btn.config(state="normal")
         self.auto_save_var.set(True)
         self.on_auto_save_toggle()
+        self._pending_plate_run_state = None
 
         state = PlateRunState(config)
         payload = state.progress_payload()
@@ -687,13 +698,164 @@ class AcquisitionApp:
         if self.worker:
             self.worker.set_plate_autosave_config(config)
 
-    def _ask_plate_settings(self):
+    def _apply_resumed_plate_state(self, state):
+        if not isinstance(state, PlateRunState):
+            raise TypeError("Expected a PlateRunState to resume plate autosave.")
+
+        self.plate_autosave_config = state.config
+        self._pending_plate_run_state = state
+        self.plate_mode_var.set(True)
+        self.configure_plate_btn.config(state="normal")
+        self.auto_save_var.set(True)
+        self.on_auto_save_toggle()
+
+        payload = state.progress_payload()
+        self.plate_history = [dict(payload)]
+        self.current_plate_index = 0
+        self._update_plate_progress(payload)
+
+        if self.worker:
+            self.worker.resume_plate_autosave(state)
+
+        if payload["current_well"] is None:
+            self.status_message_var.set(f"Loaded {state.config.plate_name}, which is already complete.")
+        else:
+            self.status_message_var.set(
+                f"Resumed {state.config.plate_name}. Next position: {payload['current_well']}."
+            )
+
+    def _discover_resumable_plate_runs(self):
+        return discover_resumable_plate_runs(self.save_dir_var.get())
+
+    def _choose_resumable_plate(self, candidates):
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+
+        result = {"candidate": None}
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Resume Plate")
+        dlg.resizable(True, True)
+        dlg.grab_set()
+        dlg.transient(self.root)
+
+        dlg.update_idletasks()
+        pw = self.root.winfo_width()
+        ph = self.root.winfo_height()
+        px = self.root.winfo_x()
+        py = self.root.winfo_y()
+        dw, dh = 760, 360
+        dlg.geometry(f"{dw}x{dh}+{px + max((pw - dw) // 2, 0)}+{py + max((ph - dh) // 2, 0)}")
+
+        outer = ttk.Frame(dlg, padding=12)
+        outer.pack(fill=tk.BOTH, expand=True)
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(1, weight=1)
+
+        ttk.Label(
+            outer,
+            text="Select a plate folder to resume",
+            font=("Segoe UI", 11, "bold"),
+        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+        columns = ("plate", "progress", "source")
+        tree = ttk.Treeview(outer, columns=columns, show="headings", height=10)
+        tree.heading("plate", text="Plate")
+        tree.heading("progress", text="Progress")
+        tree.heading("source", text="Source")
+        tree.column("plate", width=220, anchor="w")
+        tree.column("progress", width=360, anchor="w")
+        tree.column("source", width=120, anchor="w")
+        tree.grid(row=1, column=0, sticky="nsew")
+
+        scrollbar = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=tree.yview)
+        scrollbar.grid(row=1, column=1, sticky="ns")
+        tree.configure(yscrollcommand=scrollbar.set)
+
+        for index, candidate in enumerate(candidates):
+            payload = candidate["payload"]
+            next_well = payload["current_well"] or "complete"
+            progress = (
+                f"{payload['saved_shots']}/{payload['total_shots']} shots, "
+                f"{payload['complete_wells']}/{payload['total_wells']} wells, next {next_well}"
+            )
+            tree.insert(
+                "",
+                "end",
+                iid=str(index),
+                values=(candidate["plate_name"], progress, candidate["source_label"]),
+            )
+
+        tree.selection_set("0")
+        tree.focus("0")
+
+        def _confirm(*_):
+            selection = tree.selection()
+            if not selection:
+                return
+            result["candidate"] = candidates[int(selection[0])]
+            dlg.destroy()
+
+        button_bar = ttk.Frame(outer)
+        button_bar.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        ttk.Button(button_bar, text="Cancel", width=12, command=dlg.destroy).pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(button_bar, text="Resume Selected", width=18, command=_confirm).pack(side=tk.RIGHT)
+
+        tree.bind("<Double-1>", _confirm)
+        dlg.wait_window()
+        return result["candidate"]
+
+    def _prompt_resume_plate_selection(self):
+        candidates = self._discover_resumable_plate_runs()
+        if not candidates:
+            messagebox.showinfo(
+                "No Resumable Plates",
+                "No incomplete high-throughput plate folders were found in the current save directory.",
+                parent=self.root,
+            )
+            return None
+
+        candidate = self._choose_resumable_plate(candidates)
+        if candidate is None:
+            return None
+
+        if not candidate.get("needs_confirmation"):
+            return candidate["state"]
+
+        suggested_config = candidate["state"].config
+        confirmed = self._ask_plate_settings(
+            initial_config=suggested_config,
+            dialog_title="Resume Plate Settings",
+            action_text="Resume Plate",
+            allow_resume=False,
+            helper_text=(
+                "The files were scanned from disk. Review the inferred settings before resuming."
+            ),
+        )
+        if confirmed is None:
+            return None
+
+        try:
+            return PlateRunState.from_records(confirmed, candidate["records"])
+        except ValueError as exc:
+            messagebox.showerror("Resume Failed", str(exc), parent=self.root)
+            return None
+
+    def _ask_plate_settings(
+        self,
+        initial_config=None,
+        dialog_title="High-Throughput Plate Settings",
+        action_text="Use Plate Settings",
+        allow_resume=True,
+        helper_text="Files are saved into a subfolder named after the plate.",
+    ):
         """Show the modal high-throughput plate settings dialog."""
-        current = self.plate_autosave_config or PlateAutosaveConfig()
-        result = {"config": None}
+        current = initial_config or self.plate_autosave_config or PlateAutosaveConfig()
+        result = {"selection": None}
 
         dlg = tk.Toplevel(self.root)
-        dlg.title("High-Throughput Plate Settings")
+        dlg.title(dialog_title)
         dlg.resizable(True, True)
         dlg.grab_set()
         dlg.transient(self.root)
@@ -724,7 +886,7 @@ class AcquisitionApp:
 
         ttk.Label(
             main,
-            text="High-throughput plate autosave",
+            text=dialog_title,
             font=("Segoe UI", 13, "bold"),
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
 
@@ -762,7 +924,7 @@ class AcquisitionApp:
 
         ttk.Label(
             form,
-            text="Files are saved into a subfolder named after the plate.",
+            text=helper_text,
             style="Status.TLabel",
             wraplength=210,
         ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(12, 0))
@@ -812,18 +974,29 @@ class AcquisitionApp:
             except Exception:
                 messagebox.showwarning("Invalid Plate Settings", "Please enter a valid shot count.", parent=dlg)
                 return
-            result["config"] = config
+            result["selection"] = config
+            dlg.destroy()
+
+        def _resume():
+            selection = self._prompt_resume_plate_selection()
+            if selection is None:
+                return
+            result["selection"] = selection
             dlg.destroy()
 
         for var in (plate_type_var, plate_name_var, shots_var, order_var):
             var.trace_add("write", _redraw_preview)
 
         ttk.Button(button_bar, text="Cancel", width=12, command=dlg.destroy).pack(side=tk.RIGHT, padx=(6, 0))
-        ttk.Button(button_bar, text="Use Plate Settings", width=18, command=_apply).pack(side=tk.RIGHT)
+        ttk.Button(button_bar, text=action_text, width=18, command=_apply).pack(side=tk.RIGHT)
+        if allow_resume:
+            ttk.Button(button_bar, text="Resume Existing Plate...", width=22, command=_resume).pack(
+                side=tk.LEFT
+            )
 
         _redraw_preview()
         dlg.wait_window()
-        return result["config"]
+        return result["selection"]
 
     def _update_plate_progress(self, payload):
         self.plate_progress = payload
@@ -888,12 +1061,15 @@ class AcquisitionApp:
             self.status_message_var.set("Plate complete. Click Configure Plate to start the next plate.")
             return
 
-        config = self._ask_plate_settings()
-        if config is None:
+        selection = self._ask_plate_settings()
+        if selection is None:
             self.status_message_var.set("Plate complete. Click Configure Plate to start the next plate.")
             return
 
-        self._apply_plate_config(config)
+        if isinstance(selection, PlateRunState):
+            self._apply_resumed_plate_state(selection)
+        else:
+            self._apply_plate_config(selection)
 
     def _show_plate_overview(self):
         if not self.plate_overview_frame.winfo_ismapped():

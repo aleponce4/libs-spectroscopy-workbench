@@ -10,7 +10,7 @@ import logging
 import os
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, Future
-from plate_autosave import PlateAutosaveConfig, PlateRunState
+from plate_autosave import PlateAutosaveConfig, PlateRunState, save_plate_run_state
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +180,21 @@ class AcquisitionWorker(threading.Thread):
 
         with self._plate_lock:
             self._plate_run_state = PlateRunState(plate_config)
+            self._persist_plate_state_locked()
+            payload = self._plate_run_state.progress_payload()
+
+        self._send(AcquisitionMessage.PLATE_PROGRESS, payload)
+
+    def resume_plate_autosave(self, state):
+        """Resume a previously saved high-throughput plate run."""
+        if isinstance(state, PlateRunState):
+            plate_state = state
+        else:
+            plate_state = PlateRunState.from_mapping(state)
+
+        with self._plate_lock:
+            self._plate_run_state = plate_state
+            self._persist_plate_state_locked()
             payload = self._plate_run_state.progress_payload()
 
         self._send(AcquisitionMessage.PLATE_PROGRESS, payload)
@@ -188,6 +203,21 @@ class AcquisitionWorker(threading.Thread):
         """Disable high-throughput plate autosave."""
         with self._plate_lock:
             self._plate_run_state = None
+
+    def close_plate_run_early(self):
+        """Persist the current plate as closed early, then stop plate autosave."""
+        with self._plate_lock:
+            if self._plate_run_state is None:
+                return None
+
+            payload = self._plate_run_state.progress_payload()
+            payload["closed_early"] = True
+            payload["current_well"] = None
+            payload["can_discard"] = False
+            self._persist_plate_state_locked(closed_early=True)
+            self._plate_run_state = None
+
+        return payload
 
     def discard_last_plate_shot(self):
         """Move the latest plate shot to Discarded and roll progress back."""
@@ -202,6 +232,7 @@ class AcquisitionWorker(threading.Thread):
             )
             discarded_dir = os.path.join(plate_dir, "Discarded")
             record, payload = self._plate_run_state.discard_last(discarded_dir)
+            self._persist_plate_state_locked()
 
         if record is None:
             self._send(AcquisitionMessage.STATUS, "No plate shot to discard.")
@@ -447,12 +478,21 @@ class AcquisitionWorker(threading.Thread):
 
         self._save_spectrum_file(filepath, wavelengths, intensities)
         payload = plate_state.record_saved(filepath, self._shot_index)
+        self._persist_plate_state_locked()
 
         self._send(AcquisitionMessage.SAVE_COMPLETE, filepath)
         self._send(AcquisitionMessage.PLATE_PROGRESS, payload)
         if payload["complete"]:
             self._send(AcquisitionMessage.PLATE_COMPLETE, payload)
         logger.info(f"Plate auto-saved: {filepath}")
+
+    def _persist_plate_state_locked(self, *, closed_early: bool = False):
+        plate_state = self._plate_run_state
+        if plate_state is None:
+            return
+
+        plate_dir = os.path.join(self.save_directory, plate_state.config.safe_plate_name)
+        save_plate_run_state(plate_dir, plate_state, closed_early=closed_early)
 
     def _save_spectrum_file(self, filepath: str, wavelengths: np.ndarray, intensities: np.ndarray):
         # Save as tab-delimited (consistent with LIBS data format)
