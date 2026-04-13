@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import json
+import logging
 import os
 import re
 import shutil
+import time
 from typing import Any
 
 
@@ -30,6 +33,9 @@ PLATE_FILE_PATTERN = re.compile(
     r"^(?P<safe_plate_name>.+)_(?P<well>[A-Z]\d+)_shot(?P<shot_number>\d+)_"
     r"(?P<timestamp>\d{8}_\d{6})_(?P<shot_index>\d+)\.csv$"
 )
+PLATE_REPRODUCIBILITY_FILENAME = "_reproducibility.json"
+
+logger = logging.getLogger(__name__)
 
 
 def sanitize_filename_part(value: str, fallback: str = "Plate") -> str:
@@ -37,6 +43,23 @@ def sanitize_filename_part(value: str, fallback: str = "Plate") -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip())
     cleaned = cleaned.strip("._-")
     return cleaned or fallback
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def well_labels(rows: int, columns: int) -> list[str]:
@@ -57,6 +80,8 @@ class PlateAutosaveConfig:
     plate_name: str = "Plate"
     shots_per_well: int = 1
     order_mode: str = ORDER_ROW
+    laser_wavelength_nm: float | None = None
+    laser_energy_mj: float | None = None
 
     @classmethod
     def from_mapping(cls, values: dict[str, Any]) -> "PlateAutosaveConfig":
@@ -70,12 +95,26 @@ class PlateAutosaveConfig:
             order_mode = ORDER_ROW
 
         plate_name = str(values.get("plate_name", "Plate")).strip() or "Plate"
+        laser_wavelength_nm = _optional_float(values.get("laser_wavelength_nm"))
+        laser_energy_mj = _optional_float(values.get("laser_energy_mj"))
         return cls(
             plate_type=plate_type,
             plate_name=plate_name,
             shots_per_well=shots_per_well,
             order_mode=order_mode,
+            laser_wavelength_nm=laser_wavelength_nm,
+            laser_energy_mj=laser_energy_mj,
         )
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "plate_type": self.plate_type,
+            "plate_name": self.plate_name,
+            "shots_per_well": self.shots_per_well,
+            "order_mode": self.order_mode,
+            "laser_wavelength_nm": self.laser_wavelength_nm,
+            "laser_energy_mj": self.laser_energy_mj,
+        }
 
     @property
     def rows(self) -> int:
@@ -275,6 +314,8 @@ class PlateRunState:
             "order_mode": self.config.order_mode,
             "order_label": ORDER_LABELS[self.config.order_mode],
             "shots_per_well": self.config.shots_per_well,
+            "laser_wavelength_nm": self.config.laser_wavelength_nm,
+            "laser_energy_mj": self.config.laser_energy_mj,
             "shots_by_well": dict(self.shots_by_well),
             "current_well": self.current_well(),
             "complete": self.is_complete,
@@ -289,12 +330,7 @@ class PlateRunState:
 
     def to_mapping(self, plate_dir: str | None = None, **extra: Any) -> dict[str, Any]:
         data = {
-            "config": {
-                "plate_type": self.config.plate_type,
-                "plate_name": self.config.plate_name,
-                "shots_per_well": self.config.shots_per_well,
-                "order_mode": self.config.order_mode,
-            },
+            "config": self.config.to_mapping(),
             "shots_by_well": dict(self.shots_by_well),
             "history": [record.to_mapping(plate_dir=plate_dir) for record in self.history],
             "complete": self.is_complete,
@@ -307,16 +343,133 @@ def plate_state_path(plate_dir: str) -> str:
     return os.path.join(plate_dir, PLATE_STATE_FILENAME)
 
 
-def save_plate_run_state(plate_dir: str, state: PlateRunState, *, closed_early: bool = False) -> str:
+def plate_reproducibility_path(save_root: str, safe_plate_name: str | None = None) -> str:
+    if safe_plate_name:
+        filename = f"{safe_plate_name}_{PLATE_REPRODUCIBILITY_FILENAME.lstrip('_')}"
+    else:
+        filename = PLATE_REPRODUCIBILITY_FILENAME
+    return os.path.join(save_root, filename)
+
+
+def save_plate_run_state(
+    plate_dir: str,
+    state: PlateRunState,
+    *,
+    closed_early: bool = False,
+    timing: dict[str, Any] | None = None,
+) -> str:
     os.makedirs(plate_dir, exist_ok=True)
     filepath = plate_state_path(plate_dir)
     payload = state.to_mapping(plate_dir=plate_dir, closed_early=closed_early, version=1)
     payload["complete"] = bool(state.is_complete and not closed_early)
 
+    if timing is not None:
+        timing["plate_state_write_start"] = time.perf_counter()
     with open(filepath, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=True)
+    if timing is not None:
+        timing["plate_state_write_end"] = time.perf_counter()
 
     return filepath
+
+
+def _condense_timing_sample(sample: dict[str, Any]) -> dict[str, Any]:
+    def _duration(start_key: str, end_key: str) -> float | None:
+        start = sample.get(start_key)
+        end = sample.get(end_key)
+        if start is None or end is None:
+            return None
+        try:
+            return (float(end) - float(start)) * 1000.0
+        except (TypeError, ValueError):
+            return None
+
+    gui_queue_latency_ms = sample.get("gui_queue_latency_ms")
+    if gui_queue_latency_ms is None:
+        gui_queue_latency = sample.get("gui_queue_latency")
+        if gui_queue_latency is not None:
+            try:
+                gui_queue_latency_ms = float(gui_queue_latency) * 1000.0
+            except (TypeError, ValueError):
+                gui_queue_latency_ms = None
+
+    return {
+        "mode": sample.get("mode"),
+        "shot_index": sample.get("shot_index"),
+        "attempt_index": sample.get("attempt_index"),
+        "timed_out": bool(sample.get("timed_out")),
+        "trigger_wait_ms": sample.get("trigger_wait_ms") or _duration("trigger_wait_start", "trigger_wait_end"),
+        "capture_ms": sample.get("capture_ms") or _duration("cycle_start", "capture_end") or _duration("trigger_wait_start", "capture_end"),
+        "wavelength_fetch_ms": sample.get("wavelength_fetch_ms") or _duration("wavelengths_fetch_start", "wavelengths_fetch_end"),
+        "save_ms": sample.get("save_ms") or _duration("save_start", "save_end"),
+        "plate_state_write_ms": sample.get("plate_state_write_ms") or _duration("plate_state_write_start", "plate_state_write_end"),
+        "total_ms": sample.get("total_ms") or _duration("trigger_wait_start", "rearm_start") or _duration("cycle_start", "cycle_end") or _duration("cycle_start", "message_sent"),
+        "gui_queue_latency_ms": gui_queue_latency_ms,
+        "worker_enqueued_at": sample.get("worker_enqueued_at"),
+        "gui_received_at": sample.get("gui_received_at"),
+        "save_file_path": sample.get("save_file_path"),
+    }
+
+
+def save_plate_reproducibility_log(
+    save_root: str,
+    state: PlateRunState,
+    *,
+    spectrometer_info: dict[str, Any] | None = None,
+    timing_sample: dict[str, Any] | None = None,
+    event: str | None = None,
+    closed_early: bool = False,
+) -> str:
+    filepath = plate_reproducibility_path(save_root, state.config.safe_plate_name)
+    tmp_filepath = f"{filepath}.tmp"
+
+    try:
+        os.makedirs(save_root, exist_ok=True)
+
+        payload: dict[str, Any] = {}
+        if os.path.isfile(filepath):
+            try:
+                with open(filepath, "r", encoding="utf-8") as handle:
+                    loaded = json.load(handle)
+                payload = loaded if isinstance(loaded, dict) else {}
+            except (OSError, json.JSONDecodeError):
+                logger.warning("Discarding unreadable reproducibility log for %s", save_root)
+                payload = {}
+
+        payload.setdefault("version", 1)
+        payload.setdefault("events", [])
+        payload.setdefault("timing_samples", [])
+        payload["updated_at"] = _now_iso()
+        payload["closed_early"] = closed_early
+        payload["save_root"] = save_root
+        payload["plate_dir"] = os.path.join(save_root, state.config.safe_plate_name)
+        payload["plate"] = state.config.to_mapping()
+        payload["progress"] = state.progress_payload()
+        if spectrometer_info is not None:
+            payload["spectrometer"] = spectrometer_info
+        if event is not None:
+            payload["events"].append({"event": event, "at": _now_iso()})
+        if timing_sample is not None:
+            payload["timing_samples"].append(
+                {
+                    **_condense_timing_sample(timing_sample),
+                    "recorded_at": _now_iso(),
+                }
+            )
+
+        with open(tmp_filepath, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+        os.replace(tmp_filepath, filepath)
+
+        return filepath
+    except Exception as exc:
+        try:
+            if os.path.exists(tmp_filepath):
+                os.remove(tmp_filepath)
+        except OSError:
+            pass
+        logger.warning("Failed to update reproducibility log for %s: %s", save_root, exc)
+        return plate_reproducibility_path(save_root, state.config.safe_plate_name)
 
 
 def load_plate_run_state(plate_dir: str) -> tuple[PlateRunState, dict[str, Any]] | None:

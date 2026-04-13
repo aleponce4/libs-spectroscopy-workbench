@@ -10,7 +10,12 @@ import logging
 import os
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, Future
-from plate_autosave import PlateAutosaveConfig, PlateRunState, save_plate_run_state
+from plate_autosave import (
+    PlateAutosaveConfig,
+    PlateRunState,
+    save_plate_run_state,
+    save_plate_reproducibility_log,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +29,7 @@ class AcquisitionMessage:
     CAPTURED = "captured"          # A triggered capture completed
     STOPPED = "stopped"            # Worker has stopped
     SAVE_COMPLETE = "save_complete"  # Auto-save finished
+    TIMING = "timing"                # Timing sample for benchmarking
     IDLE = "idle"                      # Worker returned to idle (buttons should reset)
     PLATE_PROGRESS = "plate_progress"  # High-throughput plate progress changed
     PLATE_COMPLETE = "plate_complete"  # High-throughput plate run finished
@@ -77,9 +83,11 @@ class AcquisitionWorker(threading.Thread):
         self._shot_index = 0
         self._plate_lock = threading.Lock()
         self._plate_run_state = None
+        self.collect_timing_metrics = False
 
         # Live view rate limiting
         self.live_poll_interval = 0.05  # 50 ms between live polls
+        self.armed_poll_interval = 0.1   # 100 ms between trigger future checks
 
         # Averaging
         self.averages = 1  # Number of spectra to average in LIVE mode
@@ -171,6 +179,10 @@ class AcquisitionWorker(threading.Thread):
         """Reset the shot counter (e.g., when sample name changes)."""
         self._shot_index = 0
 
+    def enable_timing_metrics(self, enabled: bool = True):
+        """Enable or disable per-shot timing messages for benchmarking."""
+        self.collect_timing_metrics = enabled
+
     def set_plate_autosave_config(self, config):
         """Enable high-throughput plate autosave with a fresh plate run."""
         if isinstance(config, PlateAutosaveConfig):
@@ -180,7 +192,9 @@ class AcquisitionWorker(threading.Thread):
 
         with self._plate_lock:
             self._plate_run_state = PlateRunState(plate_config)
+            self.collect_timing_metrics = True
             self._persist_plate_state_locked()
+            self._persist_plate_reproducibility_log(event="plate_configured")
             payload = self._plate_run_state.progress_payload()
 
         self._send(AcquisitionMessage.PLATE_PROGRESS, payload)
@@ -194,7 +208,9 @@ class AcquisitionWorker(threading.Thread):
 
         with self._plate_lock:
             self._plate_run_state = plate_state
+            self.collect_timing_metrics = True
             self._persist_plate_state_locked()
+            self._persist_plate_reproducibility_log(event="plate_resumed")
             payload = self._plate_run_state.progress_payload()
 
         self._send(AcquisitionMessage.PLATE_PROGRESS, payload)
@@ -203,6 +219,7 @@ class AcquisitionWorker(threading.Thread):
         """Disable high-throughput plate autosave."""
         with self._plate_lock:
             self._plate_run_state = None
+        self.collect_timing_metrics = False
 
     def close_plate_run_early(self):
         """Persist the current plate as closed early, then stop plate autosave."""
@@ -215,6 +232,7 @@ class AcquisitionWorker(threading.Thread):
             payload["current_well"] = None
             payload["can_discard"] = False
             self._persist_plate_state_locked(closed_early=True)
+            self._persist_plate_reproducibility_log(event="plate_closed_early", closed_early=True)
             self._plate_run_state = None
 
         return payload
@@ -233,6 +251,7 @@ class AcquisitionWorker(threading.Thread):
             discarded_dir = os.path.join(plate_dir, "Discarded")
             record, payload = self._plate_run_state.discard_last(discarded_dir)
             self._persist_plate_state_locked()
+            self._persist_plate_reproducibility_log(event="plate_shot_discarded")
 
         if record is None:
             self._send(AcquisitionMessage.STATUS, "No plate shot to discard.")
@@ -274,6 +293,13 @@ class AcquisitionWorker(threading.Thread):
     def _run_live(self):
         """Continuous polling loop for live preview."""
         while self.state == self.STATE_LIVE and not self._stop_event.is_set():
+            timing = None
+            if self.collect_timing_metrics:
+                timing = {
+                    "mode": "live",
+                    "shot_index": self._shot_index,
+                    "cycle_start": time.perf_counter(),
+                }
             try:
                 if self.averages > 1:
                     # Average multiple spectra
@@ -291,10 +317,16 @@ class AcquisitionWorker(threading.Thread):
                 else:
                     intensities = self.spec.get_intensities(
                         correct_dark_counts=self.correct_dark_counts,
-                        correct_nonlinearity=self.correct_nonlinearity
+                            correct_nonlinearity=self.correct_nonlinearity
                     )
+                if timing is not None:
+                    timing["capture_end"] = time.perf_counter()
 
+                if timing is not None:
+                    timing["wavelengths_fetch_start"] = time.perf_counter()
                 wavelengths = self.spec.get_wavelengths()
+                if timing is not None:
+                    timing["wavelengths_fetch_end"] = time.perf_counter()
                 self._send(AcquisitionMessage.SPECTRUM, (wavelengths, intensities))
 
             except Exception as e:
@@ -305,6 +337,10 @@ class AcquisitionWorker(threading.Thread):
 
             # Rate limit
             time.sleep(self.live_poll_interval)
+            if timing is not None:
+                timing["cycle_end"] = time.perf_counter()
+                timing["message_sent"] = timing["cycle_end"]
+                self._emit_timing_sample(timing)
 
     def _run_armed(self):
         """Wait for hardware trigger, capture, auto-save, then re-arm.
@@ -317,6 +353,13 @@ class AcquisitionWorker(threading.Thread):
         that Stop can interrupt the wait.
         """
         while self.state == self.STATE_ARMED and not self._stop_event.is_set():
+            timing = None
+            if self.collect_timing_metrics:
+                timing = {
+                    "mode": "armed",
+                    "shot_index": self._shot_index + 1,
+                    "trigger_wait_start": time.perf_counter(),
+                }
             try:
                 self._send(AcquisitionMessage.STATUS,
                            "Armed — waiting for laser trigger…")
@@ -341,13 +384,21 @@ class AcquisitionWorker(threading.Thread):
                         self._send(AcquisitionMessage.STATUS, "Trigger cancelled.")
                         executor.shutdown(wait=False)
                         return  # go_idle() already flipped trigger mode
-                    time.sleep(0.1)
+                    time.sleep(self.armed_poll_interval)
 
                 # Capture completed
+                if timing is not None:
+                    timing["trigger_wait_end"] = time.perf_counter()
                 intensities = future.result()
+                if timing is not None:
+                    timing["capture_end"] = time.perf_counter()
                 executor.shutdown(wait=False)
 
+                if timing is not None:
+                    timing["wavelengths_fetch_start"] = time.perf_counter()
                 wavelengths = self.spec.get_wavelengths()
+                if timing is not None:
+                    timing["wavelengths_fetch_end"] = time.perf_counter()
 
                 self._shot_index += 1
                 self._send(AcquisitionMessage.SPECTRUM, (wavelengths, intensities))
@@ -360,11 +411,30 @@ class AcquisitionWorker(threading.Thread):
                            f"Captured shot #{self._shot_index} — re-arming…")
 
                 # Auto-save
+                plate_complete = False
                 if self.auto_save_enabled:
-                    self._auto_save(wavelengths, intensities, consume_plate=True)
-                    if self._is_plate_complete():
+                    if timing is not None:
+                        timing["save_start"] = time.perf_counter()
+                    self._auto_save(wavelengths, intensities, consume_plate=True, timing=timing)
+                    if timing is not None and "save_end" not in timing:
+                        timing["save_end"] = time.perf_counter()
+                    if self._plate_mode_enabled():
+                        self._persist_plate_reproducibility_log(
+                            event="plate_shot_saved",
+                            timing=timing,
+                        )
+                    plate_complete = self._is_plate_complete()
+                    if plate_complete:
                         self._send(AcquisitionMessage.STATUS, "Plate complete.")
-                        break
+                elif timing is not None:
+                    timing["save_start"] = timing["save_end"] = time.perf_counter()
+
+                if timing is not None:
+                    timing["rearm_start"] = time.perf_counter()
+                    self._emit_timing_sample(timing)
+
+                if plate_complete:
+                    break
 
             except Exception as e:
                 error_msg = str(e)
@@ -389,6 +459,13 @@ class AcquisitionWorker(threading.Thread):
 
     def _run_test(self):
         """One-shot normal-mode read pushed through the full capture pipeline."""
+        timing = None
+        if self.collect_timing_metrics:
+            timing = {
+                "mode": "test",
+                "shot_index": self._shot_index + 1,
+                "trigger_wait_start": time.perf_counter(),
+            }
         try:
             # Ensure normal mode for immediate read
             normal_mode = self.spec.capabilities.normal_trigger_mode
@@ -399,7 +476,13 @@ class AcquisitionWorker(threading.Thread):
                 correct_dark_counts=self.correct_dark_counts,
                 correct_nonlinearity=self.correct_nonlinearity
             )
+            if timing is not None:
+                timing["capture_end"] = time.perf_counter()
+            if timing is not None:
+                timing["wavelengths_fetch_start"] = time.perf_counter()
             wavelengths = self.spec.get_wavelengths()
+            if timing is not None:
+                timing["wavelengths_fetch_end"] = time.perf_counter()
 
             self._shot_index += 1
             self._send(AcquisitionMessage.SPECTRUM, (wavelengths, intensities))
@@ -412,13 +495,29 @@ class AcquisitionWorker(threading.Thread):
                         f"Test capture #{self._shot_index} — pipeline OK")
 
             if self.auto_save_enabled:
+                if timing is not None:
+                    timing["save_start"] = time.perf_counter()
                 self._auto_save(
                     wavelengths,
                     intensities,
                     consume_plate=self._plate_mode_enabled(),
+                    timing=timing,
                 )
+                if timing is not None and "save_end" not in timing:
+                    timing["save_end"] = time.perf_counter()
+                if self._plate_mode_enabled():
+                    self._persist_plate_reproducibility_log(
+                        event="plate_shot_saved",
+                        timing=timing,
+                    )
                 if self._is_plate_complete():
                     self._send(AcquisitionMessage.STATUS, "Plate complete.")
+            elif timing is not None:
+                timing["save_start"] = timing["save_end"] = time.perf_counter()
+
+            if timing is not None:
+                timing["rearm_start"] = time.perf_counter()
+                self._emit_timing_sample(timing)
 
         except Exception as e:
             self._send(AcquisitionMessage.ERROR, f"Test trigger failed: {e}")
@@ -428,36 +527,56 @@ class AcquisitionWorker(threading.Thread):
 
     # ─── Auto-Save ─────────────────────────────────────────────────────
 
-    def _auto_save(self, wavelengths: np.ndarray, intensities: np.ndarray, consume_plate: bool = True):
+    def _auto_save(
+        self,
+        wavelengths: np.ndarray,
+        intensities: np.ndarray,
+        consume_plate: bool = True,
+        timing: dict | None = None,
+    ):
         """Save the captured spectrum to a timestamped CSV file."""
         try:
             if consume_plate:
                 with self._plate_lock:
                     if self._plate_run_state is not None:
-                        self._auto_save_plate_locked(wavelengths, intensities)
+                        self._auto_save_plate_locked(wavelengths, intensities, timing=timing)
                         return
 
-            self._auto_save_standard(wavelengths, intensities)
+            self._auto_save_standard(wavelengths, intensities, timing=timing)
 
         except Exception as e:
             self._send(AcquisitionMessage.ERROR, f"Auto-save failed: {e}")
 
-    def _auto_save_standard(self, wavelengths: np.ndarray, intensities: np.ndarray):
+    def _auto_save_standard(
+        self,
+        wavelengths: np.ndarray,
+        intensities: np.ndarray,
+        timing: dict | None = None,
+    ):
         os.makedirs(self.save_directory, exist_ok=True)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{self.sample_name}_{timestamp}_{self._shot_index:03d}.csv"
         filepath = os.path.join(self.save_directory, filename)
 
+        if timing is not None:
+            timing["save_file_path"] = filepath
         self._save_spectrum_file(filepath, wavelengths, intensities)
+        if timing is not None:
+            timing["save_end"] = time.perf_counter()
 
         self._send(AcquisitionMessage.SAVE_COMPLETE, filepath)
         logger.info(f"Auto-saved: {filepath}")
 
-    def _auto_save_plate_locked(self, wavelengths: np.ndarray, intensities: np.ndarray):
+    def _auto_save_plate_locked(
+        self,
+        wavelengths: np.ndarray,
+        intensities: np.ndarray,
+        timing: dict | None = None,
+    ):
         plate_state = self._plate_run_state
         if plate_state is None:
-            self._auto_save_standard(wavelengths, intensities)
+            self._auto_save_standard(wavelengths, intensities, timing=timing)
             return
 
         assignment = plate_state.next_assignment()
@@ -476,9 +595,17 @@ class AcquisitionWorker(threading.Thread):
         )
         filepath = os.path.join(plate_dir, filename)
 
+        if timing is not None:
+            timing["save_file_path"] = filepath
         self._save_spectrum_file(filepath, wavelengths, intensities)
+        if timing is not None:
+            timing["save_end"] = time.perf_counter()
         payload = plate_state.record_saved(filepath, self._shot_index)
-        self._persist_plate_state_locked()
+        if timing is not None:
+            timing["plate_state_write_start"] = time.perf_counter()
+        self._persist_plate_state_locked(timing=timing)
+        if timing is not None and "plate_state_write_end" not in timing:
+            timing["plate_state_write_end"] = time.perf_counter()
 
         self._send(AcquisitionMessage.SAVE_COMPLETE, filepath)
         self._send(AcquisitionMessage.PLATE_PROGRESS, payload)
@@ -486,19 +613,75 @@ class AcquisitionWorker(threading.Thread):
             self._send(AcquisitionMessage.PLATE_COMPLETE, payload)
         logger.info(f"Plate auto-saved: {filepath}")
 
-    def _persist_plate_state_locked(self, *, closed_early: bool = False):
+    def _persist_plate_state_locked(
+        self,
+        *,
+        closed_early: bool = False,
+        timing: dict | None = None,
+    ):
         plate_state = self._plate_run_state
         if plate_state is None:
             return
 
         plate_dir = os.path.join(self.save_directory, plate_state.config.safe_plate_name)
-        save_plate_run_state(plate_dir, plate_state, closed_early=closed_early)
+        save_plate_run_state(plate_dir, plate_state, closed_early=closed_early, timing=timing)
+
+    def _persist_plate_reproducibility_log(
+        self,
+        *,
+        event: str | None = None,
+        timing: dict | None = None,
+        closed_early: bool = False,
+    ):
+        plate_state = self._plate_run_state
+        if plate_state is None:
+            return
+
+        plate_dir = os.path.join(self.save_directory, plate_state.config.safe_plate_name)
+        save_plate_reproducibility_log(
+            self.save_directory,
+            plate_state,
+            spectrometer_info=self._spectrometer_metadata(),
+            timing_sample=timing,
+            event=event,
+            closed_early=closed_early,
+        )
+
+    def _spectrometer_metadata(self) -> dict:
+        """Return a reproducibility snapshot of the connected spectrometer."""
+        caps = self.spec.capabilities
+        metadata = {
+            "brand": getattr(caps, "brand", "unknown"),
+            "model": getattr(caps, "model", "unknown"),
+            "serial_number": getattr(caps, "serial_number", "unknown"),
+            "pixel_count": getattr(caps, "pixel_count", None),
+            "wavelength_min_nm": getattr(caps, "wavelength_min", None),
+            "wavelength_max_nm": getattr(caps, "wavelength_max", None),
+            "integration_time_min_us": getattr(caps, "integration_time_min_us", None),
+            "integration_time_max_us": getattr(caps, "integration_time_max_us", None),
+            "current_integration_time_us": getattr(self.spec, "integration_time_us", None),
+            "current_trigger_mode": getattr(self.spec, "current_trigger_mode", None),
+            "trigger_modes": dict(getattr(caps, "trigger_modes", {})),
+            "supports_dark_correction": getattr(caps, "supports_dark_correction", False),
+            "supports_nonlinearity_correction": getattr(caps, "supports_nonlinearity_correction", False),
+            "spectrometer_class": type(self.spec).__name__,
+        }
+        return metadata
 
     def _save_spectrum_file(self, filepath: str, wavelengths: np.ndarray, intensities: np.ndarray):
         # Save as tab-delimited (consistent with LIBS data format)
         data = np.column_stack((wavelengths, intensities))
         header = "Wavelength\tIntensity"
         np.savetxt(filepath, data, delimiter='\t', header=header, comments='', fmt='%.6f')
+
+    def _emit_timing_sample(self, timing: dict):
+        """Send a timing payload to the GUI/benchmark consumer."""
+        if not self.collect_timing_metrics:
+            return
+
+        payload = dict(timing)
+        payload["worker_enqueued_at"] = time.perf_counter()
+        self._send(AcquisitionMessage.TIMING, payload)
 
     def _is_plate_complete(self) -> bool:
         with self._plate_lock:

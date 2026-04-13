@@ -13,7 +13,9 @@ import functools
 import queue
 import logging
 import threading
+import time
 from PIL import Image, ImageDraw, ImageFont, ImageTk
+from acquisition_sidebar import ACQUISITION_SIDEBAR_WIDTH, create_acquisition_sidebar
 from plate_autosave import (
     ORDER_COLUMN,
     discover_resumable_plate_runs,
@@ -61,9 +63,22 @@ class AcquisitionApp:
             sv_ttk.set_theme("light")
 
         self.root.title("LIBS Acquisition Mode")
-        self.root.geometry("1920x1080")
-        self.root.minsize(width=1280, height=720)
-        self.root.state("zoomed")
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        min_width = min(max(1000, ACQUISITION_SIDEBAR_WIDTH + 620), screen_w)
+        min_height = min(640, screen_h)
+        self.root.minsize(width=min_width, height=min_height)
+
+        window_w = max(min(1680, screen_w - 80), min_width)
+        window_h = max(min(980, screen_h - 80), min_height)
+        offset_x = max((screen_w - window_w) // 2, 0)
+        offset_y = max((screen_h - window_h) // 2, 0)
+        self.root.geometry(f"{window_w}x{window_h}+{offset_x}+{offset_y}")
+        if platform.system() == "Windows" and screen_w >= 1600 and screen_h >= 900:
+            try:
+                self.root.state("zoomed")
+            except tk.TclError:
+                pass
         self.root.deiconify()  # Ensure visible (root may have been hidden)
 
         try:
@@ -89,11 +104,19 @@ class AcquisitionApp:
         self.current_plate_index = None
         self._plate_completion_prompt_pending = False
         self._pending_plate_run_state = None
+        self._queue_poll_after_id = None
+        self.timing_samples = []
+        self.latest_timing_sample = None
 
         # ─── Build UI ──────────────────────────────────────────────────
         # Graph area (offset from sidebar, same as analysis mode)
         self.graph_container = tk.Frame(self.root)
-        self.graph_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=(300, 0))
+        self.graph_container.pack(
+            side=tk.TOP,
+            fill=tk.BOTH,
+            expand=True,
+            padx=(ACQUISITION_SIDEBAR_WIDTH + 20, 0),
+        )
 
         from acquisition_graph import create_acquisition_graph
         self.graph_frame, self.fig, self.ax, self.canvas, self.live_line = \
@@ -105,16 +128,15 @@ class AcquisitionApp:
         self.graph_container.grid_columnconfigure(0, weight=1)
         self.graph_frame.grid(row=0, column=0, sticky="nsew")
 
-        self.plate_overview_frame = ttk.LabelFrame(
+        self.plate_overview_frame = ttk.Frame(
             self.graph_container,
-            text="Plate Progress History",
             padding=(10, 6),
-            height=380,
+            height=440,
         )
         self.plate_overview_frame.pack_propagate(False)
         self.plate_history_canvas = tk.Canvas(
             self.plate_overview_frame,
-            height=330,
+            height=390,
             bg="#F7F9FC",
             highlightthickness=0,
         )
@@ -143,11 +165,9 @@ class AcquisitionApp:
                 height=event.height,
             ),
         )
-        self.plate_history_canvas.pack(fill=tk.X, expand=True)
+        self.plate_history_canvas.pack(fill=tk.BOTH, expand=True)
         self.plate_history_scrollbar.pack(fill=tk.X)
 
-        # Sidebar
-        from acquisition_sidebar import create_acquisition_sidebar
         create_acquisition_sidebar(self)
 
         # ─── Window Close ──────────────────────────────────────────────
@@ -302,6 +322,8 @@ class AcquisitionApp:
 
     def _finish_connection(self, status: str):
         """Common post-connection setup (UI configuration, worker start)."""
+        self.timing_samples = []
+        self.latest_timing_sample = None
         caps = self.spectrometer.capabilities
         model = caps.model or "Spectrometer"
         if len(model) > 32:
@@ -362,6 +384,7 @@ class AcquisitionApp:
 
     def on_disconnect(self):
         """Disconnect from the spectrometer."""
+        self._cancel_queue_poll()
         if self.worker:
             self.worker.stop()
             self.worker.join(timeout=3)
@@ -407,6 +430,8 @@ class AcquisitionApp:
             self._plate_completion_prompt_pending = False
             self._pending_plate_run_state = None
             self._hide_plate_overview()
+        self.timing_samples = []
+        self.latest_timing_sample = None
 
     def on_live_view(self):
         """Start live spectrum preview."""
@@ -913,8 +938,8 @@ class AcquisitionApp:
         ph = self.root.winfo_height()
         px = self.root.winfo_x()
         py = self.root.winfo_y()
-        desired_w, desired_h = 720, 520
-        min_w, min_h = 640, 460
+        desired_w, desired_h = 760, 600
+        min_w, min_h = 680, 520
         dw = max(min_w, min(desired_w, screen_w - 80))
         dh = max(min_h, min(desired_h, screen_h - 120))
         dx = px + max((pw - dw) // 2, 0)
@@ -943,6 +968,12 @@ class AcquisitionApp:
         plate_name_var = tk.StringVar(value=current.plate_name)
         shots_var = tk.StringVar(value=str(current.shots_per_well))
         order_var = tk.StringVar(value=current.order_mode)
+        laser_wavelength_var = tk.StringVar(
+            value="" if current.laser_wavelength_nm is None else str(current.laser_wavelength_nm)
+        )
+        laser_energy_var = tk.StringVar(
+            value="" if current.laser_energy_mj is None else str(current.laser_energy_mj)
+        )
 
         ttk.Label(form, text="Plate type:").grid(row=0, column=0, sticky="w", pady=4)
         plate_combo = ttk.Combobox(
@@ -968,12 +999,18 @@ class AcquisitionApp:
             row=4, column=1, sticky="w", pady=(1, 4)
         )
 
+        ttk.Label(form, text="Laser wavelength (nm):").grid(row=5, column=0, sticky="w", pady=4)
+        ttk.Entry(form, textvariable=laser_wavelength_var, width=14).grid(row=5, column=1, sticky="w", pady=4)
+
+        ttk.Label(form, text="Laser energy (mJ):").grid(row=6, column=0, sticky="w", pady=4)
+        ttk.Entry(form, textvariable=laser_energy_var, width=14).grid(row=6, column=1, sticky="w", pady=4)
+
         ttk.Label(
             form,
             text=helper_text,
             style="Status.TLabel",
             wraplength=210,
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(12, 0))
 
         preview_frame = ttk.LabelFrame(main, text="Plate Preview", padding=10)
         preview_frame.grid(row=1, column=1, sticky="nsew")
@@ -998,6 +1035,8 @@ class AcquisitionApp:
                 "plate_name": plate_name_var.get(),
                 "shots_per_well": shots_var.get(),
                 "order_mode": order_var.get(),
+                "laser_wavelength_nm": laser_wavelength_var.get(),
+                "laser_energy_mj": laser_energy_var.get(),
             })
 
         def _redraw_preview(*_):
@@ -1030,7 +1069,7 @@ class AcquisitionApp:
             result["selection"] = selection
             dlg.destroy()
 
-        for var in (plate_type_var, plate_name_var, shots_var, order_var):
+        for var in (plate_type_var, plate_name_var, shots_var, order_var, laser_wavelength_var, laser_energy_var):
             var.trace_add("write", _redraw_preview)
 
         ttk.Button(button_bar, text="Cancel", width=12, command=dlg.destroy).pack(side=tk.RIGHT, padx=(6, 0))
@@ -1146,13 +1185,13 @@ class AcquisitionApp:
             card.grid(row=0, column=index, sticky="n", padx=(0, 10), pady=2)
             plate_canvas = tk.Canvas(
                 card,
-                width=430,
-                height=290,
+                width=520,
+                height=360,
                 bg="#F7F9FC",
                 highlightthickness=1,
                 highlightbackground="#C8D0DA",
             )
-            plate_canvas.pack()
+            plate_canvas.pack(fill=tk.BOTH, expand=True)
             self._draw_plate_payload(plate_canvas, payload, preview=False)
 
         self.plate_history_inner.update_idletasks()
@@ -1201,7 +1240,7 @@ class AcquisitionApp:
         def font(size, bold=False):
             font_name = "segoeuib.ttf" if bold else "segoeui.ttf"
             try:
-                return ImageFont.truetype(font_name, max(6, px(size)))
+                return ImageFont.truetype(font_name, max(8, px(size)))
             except OSError:
                 return ImageFont.load_default()
 
@@ -1226,17 +1265,12 @@ class AcquisitionApp:
             draw.polygon(arrow, fill=color)
 
         title = f"{payload['plate_type']}-well - {payload['order_label']}"
-        draw.text(xy(8, 10), title, anchor="lt", fill="#1E2B36", font=font(9, bold=True))
-        if payload["order_mode"] == ORDER_ROW:
-            arrow_text = "Move left to right, then next row"
-        else:
-            arrow_text = "Move top to bottom, then next column"
-        draw.text(xy(8, 29), arrow_text, anchor="lt", fill="#546270", font=font(8))
+        draw.text(xy(10, 12), title, anchor="lt", fill="#1E2B36", font=font(11, bold=True))
 
-        left_bound = 54 if preview else 48
-        top_bound = 76 if preview else 72
-        right_bound = width - 16
-        bottom_bound = height - 16
+        left_bound = 62 if preview else 58
+        top_bound = 58 if preview else 56
+        right_bound = width - 20
+        bottom_bound = height - 20
         available_w = max(10, right_bound - left_bound)
         available_h = max(10, bottom_bound - top_bound)
         plate_ratio = columns / rows
@@ -1254,24 +1288,24 @@ class AcquisitionApp:
         cell_h = (bottom - top) / rows
         min_cell = min(cell_w, cell_h)
         radius = max(2, min_cell * 0.36)
-        count_font_size = 8 if min_cell >= 16 else 6
-        show_counts = min_cell >= 9
+        count_font_size = 11 if min_cell >= 18 else 9
+        show_counts = min_cell >= 10
         show_edge_labels = min_cell >= 8
-        edge_font = font(8 if min_cell >= 13 else 6, bold=True)
+        edge_font = font(12 if min_cell >= 20 else 10, bold=True)
         count_font = font(count_font_size, bold=True)
 
         if payload["order_mode"] == ORDER_ROW:
-            draw_arrow_line((left + cell_w * 0.2, top - 27), (right - cell_w * 0.2, top - 27), "#1D6FB8")
+            draw_arrow_line((left + cell_w * 0.2, top - 30), (right - cell_w * 0.2, top - 30), "#1D6FB8")
         else:
-            draw_arrow_line((left - 28, top + cell_h * 0.2), (left - 28, bottom - cell_h * 0.2), "#1D6FB8")
+            draw_arrow_line((left - 32, top + cell_h * 0.2), (left - 32, bottom - cell_h * 0.2), "#1D6FB8")
 
         if show_edge_labels:
             for column in range(1, columns + 1):
                 cx = left + (column - 0.5) * cell_w
-                draw.text(xy(cx, top - 13), str(column), anchor="mm", fill="#455462", font=edge_font)
+                draw.text(xy(cx, top - 17), str(column), anchor="mm", fill="#1E3140", font=edge_font)
             for row in range(rows):
                 cy = top + (row + 0.5) * cell_h
-                draw.text(xy(left - 13, cy), chr(65 + row), anchor="mm", fill="#455462", font=edge_font)
+                draw.text(xy(left - 17, cy), chr(65 + row), anchor="mm", fill="#1E3140", font=edge_font)
 
         for row in range(rows):
             for column in range(1, columns + 1):
@@ -1384,6 +1418,16 @@ class AcquisitionApp:
                 elif msg_type == AcquisitionMessage.SAVE_COMPLETE:
                     self.status_message_var.set(f"Saved: {os.path.basename(data)}")
 
+                elif msg_type == AcquisitionMessage.TIMING:
+                    sample = dict(data)
+                    sample["gui_received_at"] = time.perf_counter()
+                    if "worker_enqueued_at" in sample:
+                        latency_s = sample["gui_received_at"] - sample["worker_enqueued_at"]
+                        sample["gui_queue_latency"] = latency_s
+                        sample["gui_queue_latency_ms"] = latency_s * 1000.0
+                    self.latest_timing_sample = sample
+                    self.timing_samples.append(sample)
+
                 elif msg_type == AcquisitionMessage.PLATE_PROGRESS:
                     self._update_plate_progress(data)
 
@@ -1408,7 +1452,17 @@ class AcquisitionApp:
 
         # Schedule next poll (50 ms)
         if self.worker:
-            self.root.after(50, self._poll_queue)
+            self._queue_poll_after_id = self.root.after(50, self._poll_queue)
+
+    def _cancel_queue_poll(self):
+        """Cancel any pending queue polling callback."""
+        if self._queue_poll_after_id is None:
+            return
+        try:
+            self.root.after_cancel(self._queue_poll_after_id)
+        except tk.TclError:
+            pass
+        self._queue_poll_after_id = None
 
     def _cancel_highlight_timer(self):
         """Cancel any pending highlight clear callback."""
@@ -1492,6 +1546,7 @@ class AcquisitionApp:
     def _cleanup_and_quit(self):
         """Stop the worker, disconnect the spectrometer, and exit mainloop.
         Uses quit() so the shared root stays alive for Analysis mode handoff."""
+        self._cancel_queue_poll()
         self._remove_highlight()
         if self.worker:
             self.worker.stop()
@@ -1511,6 +1566,7 @@ class AcquisitionApp:
     def _cleanup_and_close(self):
         """Stop the worker, disconnect the spectrometer, and exit.
         Used when the user closes the window without handoff."""
+        self._cancel_queue_poll()
         self._remove_highlight()
         if self.worker:
             self.worker.stop()

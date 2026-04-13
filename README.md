@@ -23,6 +23,13 @@ The application launches with a mode selector:
 - **Auto-Save**: Automatic saving of triggered spectra with sample naming and shot counter.
 - **Send to Analysis**: Hand off captured spectra directly to Analysis Mode (no disk I/O).
 - **Simulation Mode**: Built-in simulated spectrometer for testing without hardware.
+- **Benchmark Runner**: `acquisition_benchmark.py` measures trigger/read/save timing and can
+  report GUI queue latency when run through the acquisition window.
+
+Example:
+```bash
+python acquisition_benchmark.py --simulate --mode test --shots 25 --auto-save
+```
 
 **Note**
 python-seabreeze requires the spectrometer to use a WinUSB/libusb compatible driver rather than the default Ocean Optics driver.
