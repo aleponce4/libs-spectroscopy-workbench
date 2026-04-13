@@ -817,6 +817,11 @@ def _describe_seabreeze_probe(probe: dict) -> str:
 
     failure = str(probe.get("failure") or "").strip()
     if failure:
+        if "No pyusb backend found" in failure:
+            return (
+                "No pyusb backend found. Install `libusb-package` "
+                "or make sure `libusb-1.0.dll` is on PATH."
+            )
         return failure
     if probe.get("use_ok"):
         return "loaded OK but list_devices() failed"

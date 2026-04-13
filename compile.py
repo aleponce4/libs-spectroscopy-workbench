@@ -106,6 +106,8 @@ hidden_imports = [
 
     # Acquisition mode modules
     "seabreeze", "seabreeze.spectrometers", "usb", "usb.core", "usb.backend",
+    "usb.backend.libusb1", "usb.backend.libusb0", "usb.backend.openusb",
+    "libusb_package",
     "mode_launcher", "acquisition_app", "acquisition_graph", "acquisition_sidebar",
     "acquisition_worker", "plate_autosave", "spectrometer", "queue", "threading"
 ]
@@ -142,6 +144,7 @@ command = [
     f"--add-data={os.path.abspath('Icons/presets_icon.png')};Icons",
     f"--add-data={os.path.abspath('Icons/savedata_icon.png')};Icons",
     f"--add-data={os.path.abspath('Icons/search_icon.png')};Icons",
+    f"--add-data={os.path.abspath('Icons/trigger_icon.png')};Icons",
     f"--add-data={os.path.abspath('Icons/spectrum_icon.png')};Icons",
     f"--add-data={os.path.abspath('Icons/Onteko_Logo.jpg')};Icons",
     

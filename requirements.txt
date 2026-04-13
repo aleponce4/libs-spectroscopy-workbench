@@ -23,13 +23,14 @@ packaging==23.1
 pandas==2.0.1
 pefile==2023.2.7
 Pillow==9.5.0
-pyinstaller==5.10.1
-pyinstaller-hooks-contrib==2023.2
+pyinstaller==5.12.0
+pyinstaller-hooks-contrib==2026.4
 pyoxidizer==0.24.0
 pyparsing==3.0.9
 python-dateutil==2.8.2
 pytz==2023.3
 pyusb==1.2.1
+libusb-package
 PyWavelets==1.4.1
 pywin32-ctypes==0.2.0
 requests==2.30.0

@@ -14,7 +14,10 @@ The application launches with a mode selector:
 - **Export**: Save plots and processed data.
 
 ### Acquisition Mode
-- **Spectrometer Control**: Connect to an Ocean Optics USB4000 via python-seabreeze.
+- **Spectrometer Control**: Connect to an Ocean Optics spectrometer via `python-seabreeze`.
+  On Windows, the app can use either a WinUSB-bound device with `cseabreeze` or a
+  libusb/libusbK-bound device with `pyseabreeze`. For source installs, make sure
+  `libusb-package` is installed so `pyseabreeze` can load a `pyusb` backend.
 - **Live View**: Real-time spectrum display with configurable integration time and averaging.
 - **Hardware Trigger**: Arm external edge trigger for laser-synchronized capture.
 - **Auto-Save**: Automatic saving of triggered spectra with sample naming and shot counter.

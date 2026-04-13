@@ -38,7 +38,7 @@ if %errorlevel% neq 0 (
 echo.
 echo Committing changes to git...
 echo ================================
-git add *.py *.bat
+git add *.py *.bat *.md requirements.txt Icons\*.png Icons\*.ico Icons\*.jpg
 git commit -m "Release %version%: Update with new features"
 if %errorlevel% neq 0 (
     echo Warning: Git commit may have failed (could be no changes)
@@ -114,9 +114,9 @@ echo    Release %version% Complete!
 echo ================================
 echo.
 echo Your release is now available at:
-echo https://github.com/YOUR_USERNAME/LIBS-Data-Analysis/releases/latest
+echo https://github.com/aleponce4/libs-spectroscopy-workbench/releases/latest
 echo.
 echo Don't forget to update your README.md download link to:
-echo https://github.com/YOUR_USERNAME/LIBS-Data-Analysis/releases/latest
+echo https://github.com/aleponce4/libs-spectroscopy-workbench/releases/latest
 echo.
 pause

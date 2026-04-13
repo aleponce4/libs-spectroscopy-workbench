@@ -337,11 +337,8 @@ class AcquisitionApp:
         self.test_trigger_btn.config(state="normal")
         self.apply_int_btn.config(state="normal")
 
-        # Arm Trigger button: only enable if the device supports external trigger
-        if caps.has_external_trigger:
-            self.arm_btn.config(state="normal")
-        else:
-            self.arm_btn.config(state="disabled")
+        # Keep the trigger action obvious once the instrument is ready.
+        self._update_arm_btn_state()
 
         # Start the worker thread
         from acquisition_worker import AcquisitionWorker
@@ -382,7 +379,7 @@ class AcquisitionApp:
         self.connect_btn.config(state="normal")
         self.disconnect_btn.config(state="disabled")
         self.live_btn.config(state="disabled")
-        self.arm_btn.config(state="disabled")
+        self._set_arm_button_visual("disabled")
         self.test_trigger_btn.config(state="disabled")
         self.stop_btn.config(state="disabled")
         self.apply_int_btn.config(state="disabled")
@@ -416,7 +413,7 @@ class AcquisitionApp:
         if self.worker:
             self.worker.start_live()
             self.live_btn.config(state="disabled")
-            self.arm_btn.config(state="disabled")
+            self._set_arm_button_visual("disabled")
             self.test_trigger_btn.config(state="disabled")
             self.stop_btn.config(state="normal")
             self.worker_state_var.set("State: LIVE")
@@ -432,9 +429,11 @@ class AcquisitionApp:
             )
             return
         if self.worker:
+            if self.worker.state == "ARMED":
+                return
             self.worker.arm_trigger()
             self.live_btn.config(state="disabled")
-            self.arm_btn.config(state="disabled")
+            self._set_arm_button_visual("armed")
             self.test_trigger_btn.config(state="disabled")
             self.stop_btn.config(state="normal")
             self.worker_state_var.set("State: ARMED")
@@ -450,7 +449,7 @@ class AcquisitionApp:
         if self.worker:
             self.worker.test_trigger()
             self.live_btn.config(state="disabled")
-            self.arm_btn.config(state="disabled")
+            self._set_arm_button_visual("disabled")
             self.test_trigger_btn.config(state="disabled")
             self.stop_btn.config(state="normal")
             self.worker_state_var.set("State: TEST")
@@ -656,12 +655,63 @@ class AcquisitionApp:
     # ═══════════════════════════════════════════════════════════════════
 
     def _update_arm_btn_state(self):
-        """Enable the Arm Trigger button only if the device supports external trigger."""
-        if self.spectrometer and self.spectrometer.is_connected:
-            if self.spectrometer.capabilities.has_external_trigger:
-                self.arm_btn.config(state="normal")
-                return
-        self.arm_btn.config(state="disabled")
+        """Keep the Arm Trigger button visually clear across acquisition states."""
+        if not hasattr(self, "arm_btn"):
+            return
+
+        if not self.spectrometer or not self.spectrometer.is_connected:
+            self._set_arm_button_visual("disabled")
+            return
+
+        if not self.spectrometer.capabilities.has_external_trigger:
+            self._set_arm_button_visual("disabled")
+            return
+
+        if self.worker and self.worker.state == "ARMED":
+            self._set_arm_button_visual("armed")
+            return
+
+        if self.worker and self.worker.state in ("LIVE", "TEST"):
+            self._set_arm_button_visual("disabled")
+            return
+
+        self._set_arm_button_visual("ready")
+
+    def _set_arm_button_visual(self, visual_state):
+        """Show whether the trigger is ready, armed, or unavailable."""
+        if not hasattr(self, "arm_btn"):
+            return
+
+        if visual_state == "armed":
+            self.arm_btn.config(
+                text="Armed | Waiting",
+                style="ArmArmed.TButton",
+                state="normal",
+            )
+            if hasattr(self, "arm_status_var"):
+                self.arm_status_var.set("Armed and waiting for trigger")
+            if hasattr(self, "arm_status_chip"):
+                self.arm_status_chip.config(bg="#DDF3E5", fg="#143223")
+        elif visual_state == "ready":
+            self.arm_btn.config(
+                text="Arm Trigger",
+                style="ArmReady.TButton",
+                state="normal",
+            )
+            if hasattr(self, "arm_status_var"):
+                self.arm_status_var.set("Arm trigger before shooting")
+            if hasattr(self, "arm_status_chip"):
+                self.arm_status_chip.config(bg="#F6D9D8", fg="#7E1F2A")
+        else:
+            self.arm_btn.config(
+                text="Arm Trigger",
+                style="LeftAligned.TButton",
+                state="disabled",
+            )
+            if hasattr(self, "arm_status_var"):
+                self.arm_status_var.set("Trigger unavailable")
+            if hasattr(self, "arm_status_chip"):
+                self.arm_status_chip.config(bg="#E4E8ED", fg="#4D5A67")
 
     # ═══════════════════════════════════════════════════════════════════
     #  Message Queue Polling (thread-safe GUI updates)
@@ -1291,6 +1341,7 @@ class AcquisitionApp:
                     logger.error(data)
 
                 elif msg_type == AcquisitionMessage.ARMED:
+                    self._set_arm_button_visual("armed")
                     self.worker_state_var.set("State: ARMED")
 
                 elif msg_type == AcquisitionMessage.CAPTURED:
@@ -1308,6 +1359,7 @@ class AcquisitionApp:
                     # The worker automatically re-arms after each capture.
                     # While it stays in ARMED state, keep Stop enabled.
                     if self.worker and self.worker.state == "ARMED":
+                        self._set_arm_button_visual("armed")
                         self.worker_state_var.set(f"State: ARMED (shot {shot_idx})")
                     else:
                         # Worker returned to idle (error or single-shot test)
@@ -1348,6 +1400,7 @@ class AcquisitionApp:
 
                 elif msg_type == AcquisitionMessage.STOPPED:
                     self._remove_highlight()
+                    self._set_arm_button_visual("disabled")
                     self.worker_state_var.set("State: STOPPED")
 
         except queue.Empty:

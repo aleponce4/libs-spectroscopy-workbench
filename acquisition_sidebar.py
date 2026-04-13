@@ -22,6 +22,36 @@ def create_acquisition_sidebar(app):
     style = ttk.Style()
     style.configure("Emphasized.TLabel", font=("Segoe UI", 16, "bold"), foreground="black")
     style.configure("LeftAligned.TButton", anchor='w')
+    style.configure(
+        "ArmReady.TButton",
+        anchor='w',
+        font=("Segoe UI", 9, "bold"),
+        padding=(10, 6),
+        foreground="#183247",
+        background="#E8F0F7",
+        bordercolor="#B7C8D8",
+    )
+    style.map(
+        "ArmReady.TButton",
+        background=[("active", "#DCEAF4"), ("pressed", "#D0E2EE")],
+        foreground=[("active", "#102638"), ("pressed", "#102638")],
+        bordercolor=[("active", "#9EB7CC"), ("pressed", "#8DA9BF")],
+    )
+    style.configure(
+        "ArmArmed.TButton",
+        anchor='w',
+        font=("Segoe UI", 9, "bold"),
+        padding=(10, 6),
+        foreground="#143223",
+        background="#DDF3E5",
+        bordercolor="#7FBF96",
+    )
+    style.map(
+        "ArmArmed.TButton",
+        background=[("active", "#D7EFDF"), ("pressed", "#CCE8D6")],
+        foreground=[("active", "#10281C"), ("pressed", "#10281C")],
+        bordercolor=[("active", "#69AB81"), ("pressed", "#5D9A74")],
+    )
     style.configure("Status.TLabel", font=("Segoe UI", 9))
     style.configure("StatusValue.TLabel", font=("Segoe UI", 9, "bold"))
 
@@ -90,17 +120,30 @@ def create_acquisition_sidebar(app):
 
     # Arm Trigger button
     try:
-        arm_icon = Image.open("Icons/search_icon.png").resize(icon_size, Image.LANCZOS)
+        arm_icon = Image.open("Icons/trigger_icon.png").resize(icon_size, Image.LANCZOS)
         app._arm_icon = ImageTk.PhotoImage(arm_icon)
     except Exception:
         app._arm_icon = None
 
     app.arm_btn = ttk.Button(
         acq_frame, text="Arm Trigger", image=app._arm_icon,
-        compound='left', style="LeftAligned.TButton", width=18,
+        compound='left', style="ArmReady.TButton", width=18,
         command=app.on_arm_trigger, state="disabled"
     )
     app.arm_btn.grid(row=1, column=0, padx=5, pady=3, sticky="ew")
+
+    app.arm_status_var = tk.StringVar(value="Trigger unavailable")
+    app.arm_status_chip = tk.Label(
+        acq_frame,
+        textvariable=app.arm_status_var,
+        bg="#E4E8ED",
+        fg="#4D5A67",
+        font=("Segoe UI", 8, "bold"),
+        padx=10,
+        pady=4,
+        anchor="w",
+    )
+    app.arm_status_chip.grid(row=2, column=0, padx=5, pady=(0, 4), sticky="ew")
 
     # Test Trigger button
     app.test_trigger_btn = ttk.Button(
@@ -108,7 +151,7 @@ def create_acquisition_sidebar(app):
         compound='left', style="LeftAligned.TButton", width=18,
         command=app.on_test_trigger, state="disabled"
     )
-    app.test_trigger_btn.grid(row=2, column=0, padx=5, pady=3, sticky="ew")
+    app.test_trigger_btn.grid(row=3, column=0, padx=5, pady=3, sticky="ew")
 
     # Stop button
     try:
@@ -122,7 +165,7 @@ def create_acquisition_sidebar(app):
         compound='left', style="LeftAligned.TButton", width=18,
         command=app.on_stop, state="disabled"
     )
-    app.stop_btn.grid(row=3, column=0, padx=5, pady=3, sticky="ew")
+    app.stop_btn.grid(row=4, column=0, padx=5, pady=3, sticky="ew")
 
     # ─── Integration Time ──────────────────────────────────────────────
     int_frame = ttk.LabelFrame(app.sidebar_frame, text="Advanced Options", padding=5)
