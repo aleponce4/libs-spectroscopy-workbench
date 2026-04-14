@@ -58,8 +58,13 @@ def create_acquisition_sidebar(app):
         app: The AcquisitionApp instance.
     """
     style = ttk.Style()
+    style.configure("Sidebar.TLabelframe.Label", font=("Segoe UI", 10, "bold"))
+    style.configure("LeftAligned.TButton", anchor="w", font=("Segoe UI", 9))
+    style.configure("Sidebar.TButton", font=("Segoe UI", 9))
+    style.configure("Sidebar.TCheckbutton", font=("Segoe UI", 9))
+    style.configure("Sidebar.TEntry", font=("Segoe UI", 9))
+    style.configure("Sidebar.TSpinbox", font=("Segoe UI", 9))
     style.configure("Emphasized.TLabel", font=("Segoe UI", 16, "bold"), foreground="black")
-    style.configure("LeftAligned.TButton", anchor="w")
     style.configure(
         "ArmReady.TButton",
         anchor="w",
@@ -129,7 +134,7 @@ def create_acquisition_sidebar(app):
 
     icon_size = (32, 32)
 
-    conn_frame = ttk.LabelFrame(app.sidebar_frame, text="Spectrometer", padding=6)
+    conn_frame = ttk.LabelFrame(app.sidebar_frame, text="Spectrometer", padding=6, style="Sidebar.TLabelframe")
     conn_frame.grid(row=0, column=0, padx=_SIDEBAR_SECTION_PAD_X, pady=(14, 6), sticky="ew")
     conn_frame.columnconfigure(0, weight=1)
 
@@ -178,7 +183,7 @@ def create_acquisition_sidebar(app):
     )
     status_label.grid(row=3, column=0, padx=6, pady=(2, 6), sticky="ew")
 
-    acq_frame = ttk.LabelFrame(app.sidebar_frame, text="Acquisition", padding=6)
+    acq_frame = ttk.LabelFrame(app.sidebar_frame, text="Acquisition", padding=6, style="Sidebar.TLabelframe")
     acq_frame.grid(row=1, column=0, padx=_SIDEBAR_SECTION_PAD_X, pady=6, sticky="ew")
     acq_frame.columnconfigure(0, weight=1)
 
@@ -222,7 +227,7 @@ def create_acquisition_sidebar(app):
         textvariable=app.arm_status_var,
         bg="#E4E8ED",
         fg="#4D5A67",
-        font=("Segoe UI", 8, "bold"),
+        font=("Segoe UI", 9, "bold"),
         padx=10,
         pady=4,
         anchor="w",
@@ -256,7 +261,7 @@ def create_acquisition_sidebar(app):
     )
     app.stop_btn.grid(row=4, column=0, padx=6, pady=4, sticky="ew")
 
-    int_frame = ttk.LabelFrame(app.sidebar_frame, text="Advanced Options", padding=6)
+    int_frame = ttk.LabelFrame(app.sidebar_frame, text="Advanced Options", padding=6, style="Sidebar.TLabelframe")
     int_frame.grid(row=2, column=0, padx=_SIDEBAR_SECTION_PAD_X, pady=6, sticky="ew")
     int_frame.columnconfigure(0, weight=1)
 
@@ -292,7 +297,7 @@ def create_acquisition_sidebar(app):
     )
     app.advanced_options_btn.grid(row=0, column=0, padx=6, pady=4, sticky="ew")
 
-    int_entry = ttk.Entry(app.advanced_options_body, textvariable=app.integration_var)
+    int_entry = ttk.Entry(app.advanced_options_body, textvariable=app.integration_var, style="Sidebar.TEntry")
     int_entry.grid(row=0, column=0, padx=(6, 4), pady=4, sticky="ew")
 
     ttk.Label(app.advanced_options_body, text="ms", style="Status.TLabel").grid(
@@ -307,6 +312,7 @@ def create_acquisition_sidebar(app):
         app.advanced_options_body,
         text="Apply",
         command=app.on_apply_integration,
+        style="Sidebar.TButton",
         state="disabled",
     )
     app.apply_int_btn.grid(row=0, column=2, padx=(6, 6), pady=4, sticky="e")
@@ -326,6 +332,7 @@ def create_acquisition_sidebar(app):
         width=6,
         textvariable=app.averages_var,
         command=app.on_averages_changed,
+        style="Sidebar.TSpinbox",
     )
     avg_spinbox.grid(row=1, column=1, columnspan=2, padx=(0, 6), pady=4, sticky="w")
 
@@ -335,6 +342,7 @@ def create_acquisition_sidebar(app):
         text="Dark count correction",
         variable=app.correct_dark_var,
         command=app.on_corrections_changed,
+        style="Sidebar.TCheckbutton",
     )
     app.dark_check.grid(row=2, column=0, columnspan=3, padx=6, pady=2, sticky="w")
 
@@ -344,6 +352,7 @@ def create_acquisition_sidebar(app):
         text="Nonlinearity correction",
         variable=app.correct_nl_var,
         command=app.on_corrections_changed,
+        style="Sidebar.TCheckbutton",
     )
     app.nl_check.grid(row=3, column=0, columnspan=3, padx=6, pady=2, sticky="w")
 
@@ -359,7 +368,7 @@ def create_acquisition_sidebar(app):
     app.advanced_options_body.grid(row=1, column=0, sticky="ew")
     app.advanced_options_body.grid_remove()
 
-    save_frame = ttk.LabelFrame(app.sidebar_frame, text="Auto-Save", padding=6)
+    save_frame = ttk.LabelFrame(app.sidebar_frame, text="Auto-Save", padding=6, style="Sidebar.TLabelframe")
     save_frame.grid(row=3, column=0, padx=_SIDEBAR_SECTION_PAD_X, pady=6, sticky="ew")
     save_frame.columnconfigure(0, weight=0)
     save_frame.columnconfigure(1, weight=1)
@@ -370,6 +379,7 @@ def create_acquisition_sidebar(app):
         text="Auto-save on trigger",
         variable=app.auto_save_var,
         command=app.on_auto_save_toggle,
+        style="Sidebar.TCheckbutton",
     )
     auto_save_check.grid(row=0, column=0, columnspan=2, padx=6, pady=4, sticky="w")
 
@@ -381,7 +391,7 @@ def create_acquisition_sidebar(app):
         sticky="w",
     )
     app.sample_name_var = tk.StringVar(value="Sample")
-    sample_entry = ttk.Entry(save_frame, textvariable=app.sample_name_var)
+    sample_entry = ttk.Entry(save_frame, textvariable=app.sample_name_var, style="Sidebar.TEntry")
     sample_entry.grid(row=1, column=1, padx=6, pady=4, sticky="ew")
     app.sample_name_var.trace_add("write", lambda *_: app.on_sample_name_changed())
 
@@ -394,7 +404,7 @@ def create_acquisition_sidebar(app):
     )
     app.save_dir_var = tk.StringVar(value=os.path.join(os.path.expanduser("~"), "LIBS_Data"))
 
-    dir_btn = ttk.Button(save_frame, text="Browse...", command=app.on_browse_save_dir)
+    dir_btn = ttk.Button(save_frame, text="Browse...", command=app.on_browse_save_dir, style="Sidebar.TButton")
     dir_btn.grid(row=2, column=1, padx=6, pady=4, sticky="ew")
 
     app.shot_count_var = tk.StringVar(value="Shots: 0")
@@ -410,6 +420,7 @@ def create_acquisition_sidebar(app):
         text="High-throughput plate mode",
         variable=app.plate_mode_var,
         command=app.on_plate_mode_toggle,
+        style="Sidebar.TCheckbutton",
     )
     plate_mode_check.grid(row=4, column=0, columnspan=2, padx=6, pady=(8, 4), sticky="w")
 
@@ -417,6 +428,7 @@ def create_acquisition_sidebar(app):
         save_frame,
         text="Configure Plate...",
         command=app.on_configure_plate,
+        style="Sidebar.TButton",
         state="disabled",
     )
     app.configure_plate_btn.grid(row=5, column=0, columnspan=2, padx=6, pady=4, sticky="ew")
@@ -434,24 +446,36 @@ def create_acquisition_sidebar(app):
     plate_actions_frame.grid(row=7, column=0, columnspan=2, padx=6, pady=(4, 6), sticky="ew")
     plate_actions_frame.columnconfigure(0, weight=1)
     plate_actions_frame.columnconfigure(1, weight=1)
+    plate_actions_frame.columnconfigure(2, weight=1)
 
     app.discard_plate_shot_btn = ttk.Button(
         plate_actions_frame,
-        text="Discard Shot",
+        text="Discard Last",
         command=app.on_discard_last_plate_shot,
+        style="Sidebar.TButton",
         state="disabled",
     )
     app.discard_plate_shot_btn.grid(row=0, column=0, padx=(0, 3), sticky="ew")
+
+    app.repair_plate_wells_btn = ttk.Button(
+        plate_actions_frame,
+        text="Repair",
+        command=app.on_repair_plate_wells,
+        style="Sidebar.TButton",
+        state="disabled",
+    )
+    app.repair_plate_wells_btn.grid(row=0, column=1, padx=3, sticky="ew")
 
     app.finish_plate_btn = ttk.Button(
         plate_actions_frame,
         text="Finish Plate",
         command=app.on_finish_plate_early,
+        style="Sidebar.TButton",
         state="disabled",
     )
-    app.finish_plate_btn.grid(row=0, column=1, padx=(3, 0), sticky="ew")
+    app.finish_plate_btn.grid(row=0, column=2, padx=(3, 0), sticky="ew")
 
-    action_frame = ttk.LabelFrame(app.sidebar_frame, text="Actions", padding=6)
+    action_frame = ttk.LabelFrame(app.sidebar_frame, text="Actions", padding=6, style="Sidebar.TLabelframe")
     action_frame.grid(row=4, column=0, padx=_SIDEBAR_SECTION_PAD_X, pady=6, sticky="ew")
     action_frame.columnconfigure(0, weight=1)
 

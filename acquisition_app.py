@@ -107,7 +107,6 @@ class AcquisitionApp:
         self._queue_poll_after_id = None
         self.timing_samples = []
         self.latest_timing_sample = None
-
         # ─── Build UI ──────────────────────────────────────────────────
         # Graph area (offset from sidebar, same as analysis mode)
         self.graph_container = tk.Frame(self.root)
@@ -418,6 +417,8 @@ class AcquisitionApp:
             self.correct_nl_var.set(False)
         if hasattr(self, 'discard_plate_shot_btn'):
             self.discard_plate_shot_btn.config(state="disabled")
+        if hasattr(self, 'repair_plate_wells_btn'):
+            self.repair_plate_wells_btn.config(state="disabled")
         if hasattr(self, 'finish_plate_btn'):
             self.finish_plate_btn.config(state="disabled")
         if hasattr(self, 'plate_progress_var'):
@@ -556,6 +557,7 @@ class AcquisitionApp:
                 self.worker.disable_plate_autosave()
             self.configure_plate_btn.config(state="disabled")
             self.discard_plate_shot_btn.config(state="disabled")
+            self.repair_plate_wells_btn.config(state="disabled")
             self.finish_plate_btn.config(state="disabled")
             self.plate_progress_var.set("")
             self.plate_progress = None
@@ -588,9 +590,40 @@ class AcquisitionApp:
         if self.worker:
             self.worker.discard_last_plate_shot()
 
+    def on_repair_plate_wells(self):
+        """Pause the current plate run, select wells, and queue a repair pass."""
+        if (
+            not self.worker
+            or not self.plate_progress
+            or self._plate_payload_finished(self.plate_progress)
+            or self.plate_progress.get("repair_active")
+        ):
+            return
+
+        resume_state = self._pause_plate_worker_for_modal()
+        selected_wells = None
+        try:
+            selected_wells = self._ask_plate_repair_wells()
+        finally:
+            if not selected_wells:
+                self._resume_plate_worker_mode(resume_state)
+
+        if not selected_wells:
+            return
+
+        self.worker.start_plate_repair(selected_wells)
+        self._resume_plate_worker_mode(resume_state)
+
     def on_finish_plate_early(self):
         """Close the current plate early and prompt for the next one."""
         if not self.plate_progress or self._plate_payload_finished(self.plate_progress):
+            return
+        if self.plate_progress.get("repair_active"):
+            messagebox.showinfo(
+                "Repair In Progress",
+                "Finish the current repair pass before closing the plate early.",
+                parent=self.root,
+            )
             return
 
         if self._is_acquisition_busy():
@@ -617,6 +650,168 @@ class AcquisitionApp:
             self.worker.close_plate_run_early()
         self._pending_plate_run_state = None
         self._prompt_for_next_plate()
+
+    def _pause_plate_worker_for_modal(self):
+        """Pause live/armed acquisition before opening a modal plate action."""
+        if not self.worker:
+            return None
+
+        previous_state = self.worker.state
+        if previous_state in ("LIVE", "ARMED", "TEST"):
+            self.on_stop()
+            return previous_state
+        return None
+
+    def _resume_plate_worker_mode(self, previous_state):
+        """Restore the worker mode that was active before a modal plate action."""
+        if previous_state == "ARMED":
+            self.on_arm_trigger()
+        elif previous_state == "LIVE":
+            self.on_live_view()
+
+    def _format_well_list(self, wells, max_items=8):
+        ordered = [well for well in self.plate_autosave_config.ordered_wells if well in set(wells)] if self.plate_autosave_config else list(wells)
+        if len(ordered) <= max_items:
+            return ", ".join(ordered)
+        return f"{', '.join(ordered[:max_items])}, +{len(ordered) - max_items} more"
+
+    def _ask_plate_repair_wells(self):
+        """Let the user click wells to repair on the current plate map."""
+        if not self.plate_progress:
+            return None
+
+        repairable_wells = {
+            well for well, count in self.plate_progress["shots_by_well"].items()
+            if count > 0
+        }
+        if not repairable_wells:
+            messagebox.showinfo(
+                "No Saved Wells",
+                "There are no saved wells available to repair yet.",
+                parent=self.root,
+            )
+            return None
+
+        result = {"selection": None}
+        selected_wells: set[str] = set()
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Repair Plate Wells")
+        dlg.resizable(True, True)
+        dlg.grab_set()
+        dlg.transient(self.root)
+
+        dlg.update_idletasks()
+        pw = self.root.winfo_width()
+        ph = self.root.winfo_height()
+        px = self.root.winfo_x()
+        py = self.root.winfo_y()
+        dw, dh = 860, 660
+        dlg.geometry(f"{dw}x{dh}+{px + max((pw - dw) // 2, 0)}+{py + max((ph - dh) // 2, 0)}")
+        dlg.minsize(760, 580)
+
+        outer = ttk.Frame(dlg, padding=14)
+        outer.pack(fill=tk.BOTH, expand=True)
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(2, weight=1)
+
+        ttk.Label(
+            outer,
+            text="Select wells to repair",
+            font=("Segoe UI", 13, "bold"),
+        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+        ttk.Label(
+            outer,
+            text="Click any saved well to re-shoot it. The current files for those wells will move to Discarded, then the plate run will temporarily revisit them before resuming the normal order.",
+            style="Status.TLabel",
+            wraplength=760,
+        ).grid(row=1, column=0, sticky="ew", pady=(0, 10))
+
+        preview = ttk.LabelFrame(outer, text="Plate Repair Map", padding=10)
+        preview.grid(row=2, column=0, sticky="nsew")
+        preview.columnconfigure(0, weight=1)
+        preview.rowconfigure(0, weight=1)
+
+        canvas = tk.Canvas(
+            preview,
+            width=700,
+            height=430,
+            bg="#F7F9FC",
+            highlightthickness=1,
+            highlightbackground="#C8D0DA",
+        )
+        canvas.grid(row=0, column=0, sticky="nsew")
+
+        selected_var = tk.StringVar(value="Selected wells: none")
+        ttk.Label(
+            outer,
+            textvariable=selected_var,
+            style="StatusValue.TLabel",
+            wraplength=760,
+        ).grid(row=3, column=0, sticky="ew", pady=(10, 0))
+
+        def _refresh_summary():
+            if selected_wells:
+                selected_var.set(f"Selected wells: {self._format_well_list(selected_wells)}")
+            else:
+                selected_var.set("Selected wells: none")
+
+        def _redraw():
+            payload = dict(self.plate_progress)
+            self._draw_plate_payload(
+                canvas,
+                payload,
+                preview=False,
+                selected_wells=selected_wells,
+                disabled_wells=set(payload["shots_by_well"]) - repairable_wells,
+            )
+
+        def _on_click(event):
+            well = self._well_from_canvas_point(
+                self.plate_progress,
+                event.x,
+                event.y,
+                preview=False,
+                canvas_width=canvas.winfo_width(),
+                canvas_height=canvas.winfo_height(),
+            )
+            if not well or well not in repairable_wells:
+                return
+            if well in selected_wells:
+                selected_wells.remove(well)
+            else:
+                selected_wells.add(well)
+            _refresh_summary()
+            _redraw()
+
+        def _confirm():
+            if not selected_wells:
+                messagebox.showinfo(
+                    "Select Wells",
+                    "Choose at least one saved well to repair.",
+                    parent=dlg,
+                )
+                return
+            ordered = [
+                well for well in self.plate_autosave_config.ordered_wells
+                if well in selected_wells
+            ]
+            result["selection"] = ordered
+            dlg.destroy()
+
+        canvas.bind("<Button-1>", _on_click)
+        canvas.bind("<Configure>", lambda _event: _redraw())
+
+        button_bar = ttk.Frame(outer)
+        button_bar.grid(row=4, column=0, sticky="ew", pady=(12, 0))
+        ttk.Button(button_bar, text="Cancel", width=12, command=dlg.destroy).pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(button_bar, text="Repair Selected Wells", width=22, command=_confirm).pack(side=tk.RIGHT)
+
+        _refresh_summary()
+        _redraw()
+        dlg.wait_window()
+        return result["selection"]
 
     def on_sample_name_changed(self):
         """Update the sample name in the worker and reset shot index."""
@@ -1089,7 +1284,13 @@ class AcquisitionApp:
             return
 
         self._update_plate_history_card(payload)
-        if payload["current_well"] is None:
+        if payload.get("repair_active"):
+            queue_text = ", ".join(payload.get("repair_queue", [])[:3])
+            if len(payload.get("repair_queue", [])) > 3:
+                queue_text += f", +{len(payload['repair_queue']) - 3} more"
+            resume_well = payload.get("repair_resume_well") or "plate completion"
+            next_text = f"repairing {queue_text}, then resume {resume_well}"
+        elif payload["current_well"] is None:
             next_text = "finished early" if payload.get("closed_early") else "complete"
         else:
             next_text = f"next {payload['current_well']}"
@@ -1104,8 +1305,15 @@ class AcquisitionApp:
         self.discard_plate_shot_btn.config(
             state="normal" if payload.get("can_discard") and not finished else "disabled"
         )
+        self.repair_plate_wells_btn.config(
+            state="normal"
+            if payload.get("saved_shots", 0) and not finished and not payload.get("repair_active")
+            else "disabled"
+        )
         self.finish_plate_btn.config(
-            state="normal" if payload.get("saved_shots", 0) and not finished else "disabled"
+            state="normal"
+            if payload.get("saved_shots", 0) and not finished and not payload.get("repair_active")
+            else "disabled"
         )
 
     def _start_plate_history_card(self, payload):
@@ -1216,7 +1424,56 @@ class AcquisitionApp:
         max_scroll = max(1, content_width - visible_width)
         self.plate_history_canvas.xview_moveto(max(0, min(target.winfo_x() / max_scroll, 1)))
 
-    def _draw_plate_payload(self, canvas, payload, preview=False):
+    def _plate_layout_metrics(self, payload, width, height, preview=False):
+        rows = payload["rows"]
+        columns = payload["columns"]
+        left_bound = 62 if preview else 58
+        top_bound = 58 if preview else 56
+        right_bound = width - 20
+        bottom_bound = height - 20
+        available_w = max(10, right_bound - left_bound)
+        available_h = max(10, bottom_bound - top_bound)
+        plate_ratio = columns / rows
+        if available_w / available_h > plate_ratio:
+            grid_h = available_h
+            grid_w = grid_h * plate_ratio
+        else:
+            grid_w = available_w
+            grid_h = grid_w / plate_ratio
+        left = left_bound + (available_w - grid_w) / 2
+        top = top_bound + (available_h - grid_h) / 2
+        right = left + grid_w
+        bottom = top + grid_h
+        cell_w = (right - left) / columns
+        cell_h = (bottom - top) / rows
+        return {
+            "rows": rows,
+            "columns": columns,
+            "left": left,
+            "top": top,
+            "right": right,
+            "bottom": bottom,
+            "cell_w": cell_w,
+            "cell_h": cell_h,
+            "min_cell": min(cell_w, cell_h),
+        }
+
+    def _well_from_canvas_point(self, payload, x, y, preview=False, canvas_width=None, canvas_height=None):
+        width = max(1, int(canvas_width or 0))
+        height = max(1, int(canvas_height or 0))
+        if width <= 1 or height <= 1:
+            width = 700 if not preview else 420
+            height = 430 if not preview else 320
+        metrics = self._plate_layout_metrics(payload, width, height, preview=preview)
+        if not (metrics["left"] <= x <= metrics["right"] and metrics["top"] <= y <= metrics["bottom"]):
+            return None
+        column = int((x - metrics["left"]) / metrics["cell_w"]) + 1
+        row = int((y - metrics["top"]) / metrics["cell_h"])
+        if row < 0 or row >= metrics["rows"] or column < 1 or column > metrics["columns"]:
+            return None
+        return f"{chr(65 + row)}{column}"
+
+    def _draw_plate_payload(self, canvas, payload, preview=False, selected_wells=None, disabled_wells=None):
         canvas.delete("all")
 
         width = max(canvas.winfo_width(), int(canvas.cget("width") or 1))
@@ -1227,6 +1484,10 @@ class AcquisitionApp:
         shots_per_well = payload["shots_per_well"]
         shots_by_well = payload["shots_by_well"]
         current_well = payload["current_well"]
+        selected_wells = set(selected_wells or [])
+        disabled_wells = set(disabled_wells or [])
+        repair_queue = list(payload.get("repair_queue", []))
+        repaired_wells = set(payload.get("repaired_wells", []))
 
         image = Image.new("RGB", (width * scale, height * scale), "#F7F9FC")
         draw = ImageDraw.Draw(image)
@@ -1267,26 +1528,14 @@ class AcquisitionApp:
         title = f"{payload['plate_type']}-well - {payload['order_label']}"
         draw.text(xy(10, 12), title, anchor="lt", fill="#1E2B36", font=font(11, bold=True))
 
-        left_bound = 62 if preview else 58
-        top_bound = 58 if preview else 56
-        right_bound = width - 20
-        bottom_bound = height - 20
-        available_w = max(10, right_bound - left_bound)
-        available_h = max(10, bottom_bound - top_bound)
-        plate_ratio = columns / rows
-        if available_w / available_h > plate_ratio:
-            grid_h = available_h
-            grid_w = grid_h * plate_ratio
-        else:
-            grid_w = available_w
-            grid_h = grid_w / plate_ratio
-        left = left_bound + (available_w - grid_w) / 2
-        top = top_bound + (available_h - grid_h) / 2
-        right = left + grid_w
-        bottom = top + grid_h
-        cell_w = (right - left) / columns
-        cell_h = (bottom - top) / rows
-        min_cell = min(cell_w, cell_h)
+        metrics = self._plate_layout_metrics(payload, width, height, preview=preview)
+        left = metrics["left"]
+        top = metrics["top"]
+        right = metrics["right"]
+        bottom = metrics["bottom"]
+        cell_w = metrics["cell_w"]
+        cell_h = metrics["cell_h"]
+        min_cell = metrics["min_cell"]
         radius = max(2, min_cell * 0.36)
         count_font_size = 11 if min_cell >= 18 else 9
         show_counts = min_cell >= 10
@@ -1316,13 +1565,30 @@ class AcquisitionApp:
                 fill = "#DDE5EE"
                 outline = "#9BA8B4"
                 width_px = 1
+                text_fill = "#14212B"
                 if count >= shots_per_well:
                     fill = "#55B97D"
                     outline = "#2F7E50"
                 elif count > 0:
                     fill = "#F3C760"
                     outline = "#A87A16"
-                if well == current_well:
+                if well in repair_queue:
+                    fill = "#F3C760"
+                    outline = "#8C6714"
+                    width_px = 2
+                if well in repaired_wells and count >= shots_per_well:
+                    fill = "#55B97D"
+                    outline = "#1F5E3C"
+                    width_px = 2
+                if well in selected_wells:
+                    fill = "#DDEBFA"
+                    outline = "#1F5D96"
+                    width_px = 3
+                if well in disabled_wells:
+                    fill = "#EEF2F5"
+                    outline = "#C4CDD6"
+                    text_fill = "#8A99A8"
+                if well == current_well and well not in repair_queue:
                     outline = "#D33232"
                     width_px = 2
 
@@ -1338,7 +1604,7 @@ class AcquisitionApp:
                     width=max(1, px(width_px)),
                 )
                 if show_counts and count > 0:
-                    draw.text(xy(cx, cy), str(count), anchor="mm", fill="#14212B", font=count_font)
+                    draw.text(xy(cx, cy), str(count), anchor="mm", fill=text_fill, font=count_font)
 
         resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
         photo = ImageTk.PhotoImage(image.resize((width, height), resample))
@@ -1436,6 +1702,17 @@ class AcquisitionApp:
                     discarded = data.get("discarded")
                     if discarded:
                         self.status_message_var.set(f"Discarded: {os.path.basename(discarded)}")
+
+                elif msg_type == AcquisitionMessage.PLATE_REPAIR_STARTED:
+                    self._update_plate_progress(data)
+                    queued = data.get("repair_queue", [])
+                    if queued:
+                        self.status_message_var.set(f"Repairing wells: {self._format_well_list(queued)}")
+
+                elif msg_type == AcquisitionMessage.PLATE_REPAIR_COMPLETE:
+                    self._update_plate_progress(data)
+                    next_well = data.get("current_well") or "plate completion"
+                    self.status_message_var.set(f"Repair pass complete. Resuming {next_well}.")
 
                 elif msg_type == AcquisitionMessage.PLATE_COMPLETE:
                     self._update_plate_progress(data)

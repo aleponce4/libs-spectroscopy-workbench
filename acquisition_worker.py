@@ -34,6 +34,8 @@ class AcquisitionMessage:
     PLATE_PROGRESS = "plate_progress"  # High-throughput plate progress changed
     PLATE_COMPLETE = "plate_complete"  # High-throughput plate run finished
     PLATE_DISCARDED = "plate_discarded"  # Last high-throughput shot was discarded
+    PLATE_REPAIR_STARTED = "plate_repair_started"  # Specific wells were queued for repair
+    PLATE_REPAIR_COMPLETE = "plate_repair_complete"  # Specific-well repair pass finished
 
 
 class AcquisitionWorker(threading.Thread):
@@ -262,6 +264,40 @@ class AcquisitionWorker(threading.Thread):
         self._send(
             AcquisitionMessage.STATUS,
             f"Discarded {record.well} shot {record.shot_number}; repeat this shot.",
+        )
+
+    def start_plate_repair(self, wells):
+        """Queue a specific-well repair pass and move the old files aside."""
+        selected_wells = [str(well).upper() for well in wells if str(well).strip()]
+        if not selected_wells:
+            self._send(AcquisitionMessage.ERROR, "Select at least one well to repair.")
+            return
+
+        with self._plate_lock:
+            if self._plate_run_state is None:
+                self._send(AcquisitionMessage.ERROR, "No active plate run to repair.")
+                return
+
+            plate_dir = os.path.join(
+                self.save_directory,
+                self._plate_run_state.config.safe_plate_name,
+            )
+            discarded_dir = os.path.join(plate_dir, "Discarded")
+
+            try:
+                _, payload = self._plate_run_state.start_repair(selected_wells, discarded_dir)
+            except (RuntimeError, ValueError) as exc:
+                self._send(AcquisitionMessage.ERROR, str(exc))
+                return
+
+            self._persist_plate_state_locked()
+            self._persist_plate_reproducibility_log(event="plate_repair_started")
+
+        self._send(AcquisitionMessage.PLATE_REPAIR_STARTED, payload)
+        self._send(AcquisitionMessage.PLATE_PROGRESS, payload)
+        self._send(
+            AcquisitionMessage.STATUS,
+            f"Repair queued for {', '.join(payload.get('repair_queue', []))}.",
         )
 
     # ─── Thread Main Loop ─────────────────────────────────────────────
@@ -600,7 +636,9 @@ class AcquisitionWorker(threading.Thread):
         self._save_spectrum_file(filepath, wavelengths, intensities)
         if timing is not None:
             timing["save_end"] = time.perf_counter()
+        repair_active_before_save = plate_state.repair_active
         payload = plate_state.record_saved(filepath, self._shot_index)
+        repair_completed = repair_active_before_save and not plate_state.repair_active
         if timing is not None:
             timing["plate_state_write_start"] = time.perf_counter()
         self._persist_plate_state_locked(timing=timing)
@@ -609,6 +647,9 @@ class AcquisitionWorker(threading.Thread):
 
         self._send(AcquisitionMessage.SAVE_COMPLETE, filepath)
         self._send(AcquisitionMessage.PLATE_PROGRESS, payload)
+        if repair_completed:
+            self._persist_plate_reproducibility_log(event="plate_repair_completed")
+            self._send(AcquisitionMessage.PLATE_REPAIR_COMPLETE, payload)
         if payload["complete"]:
             self._send(AcquisitionMessage.PLATE_COMPLETE, payload)
         logger.info(f"Plate auto-saved: {filepath}")

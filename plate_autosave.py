@@ -139,6 +139,7 @@ class PlateShotRecord:
     shot_number: int
     shot_index: int
     filepath: str
+    is_repair: bool = False
 
     @classmethod
     def from_mapping(cls, values: dict[str, Any], plate_dir: str | None = None) -> "PlateShotRecord":
@@ -151,6 +152,7 @@ class PlateShotRecord:
             shot_number=int(values.get("shot_number", 0)),
             shot_index=int(values.get("shot_index", 0)),
             filepath=filepath,
+            is_repair=bool(values.get("is_repair", False)),
         )
 
     def to_mapping(self, plate_dir: str | None = None) -> dict[str, Any]:
@@ -166,6 +168,7 @@ class PlateShotRecord:
             "shot_number": self.shot_number,
             "shot_index": self.shot_index,
             "filepath": filepath,
+            "is_repair": self.is_repair,
         }
 
 
@@ -174,10 +177,18 @@ class PlateRunState:
     config: PlateAutosaveConfig
     shots_by_well: dict[str, int] = field(default_factory=dict)
     history: list[PlateShotRecord] = field(default_factory=list)
+    repair_queue: list[str] = field(default_factory=list)
+    repair_resume_well: str | None = None
 
     def __post_init__(self):
         for well in self.config.ordered_wells:
             self.shots_by_well.setdefault(well, 0)
+        self.repair_queue = [
+            well for well in self.repair_queue
+            if well in self.shots_by_well
+        ]
+        if self.repair_resume_well not in self.shots_by_well:
+            self.repair_resume_well = None
 
     @classmethod
     def from_mapping(cls, values: dict[str, Any], plate_dir: str | None = None) -> "PlateRunState":
@@ -207,11 +218,23 @@ class PlateRunState:
             history,
             key=lambda record: (record.shot_index, record.well, record.shot_number, record.filepath),
         )
+        raw_repair_queue = values.get("repair_queue", [])
+        if isinstance(raw_repair_queue, list):
+            state.repair_queue = [
+                str(well)
+                for well in raw_repair_queue
+                if str(well) in state.shots_by_well
+            ]
+        repair_resume_well = values.get("repair_resume_well")
+        if isinstance(repair_resume_well, str) and repair_resume_well in state.shots_by_well:
+            state.repair_resume_well = repair_resume_well
 
         if state.history:
             rebuilt = cls.from_records(config_obj, state.history)
             rebuilt.shots_by_well.update(state.shots_by_well)
             rebuilt.history = state.history
+            rebuilt.repair_queue = list(state.repair_queue)
+            rebuilt.repair_resume_well = state.repair_resume_well
             for well in rebuilt.shots_by_well:
                 rebuilt.shots_by_well[well] = max(
                     rebuilt.shots_by_well[well],
@@ -250,11 +273,20 @@ class PlateRunState:
     def is_complete(self) -> bool:
         return self.current_well() is None
 
-    def current_well(self) -> str | None:
+    @property
+    def repair_active(self) -> bool:
+        return bool(self.repair_queue)
+
+    def normal_current_well(self) -> str | None:
         for well in self.config.ordered_wells:
             if self.shots_by_well.get(well, 0) < self.config.shots_per_well:
                 return well
         return None
+
+    def current_well(self) -> str | None:
+        if self.repair_queue:
+            return self.repair_queue[0]
+        return self.normal_current_well()
 
     def next_assignment(self) -> tuple[str, int] | None:
         well = self.current_well()
@@ -268,6 +300,7 @@ class PlateRunState:
             raise RuntimeError("Plate is already complete.")
 
         well, shot_number = assignment
+        is_repair = bool(self.repair_queue and self.repair_queue[0] == well)
         self.shots_by_well[well] = shot_number
         self.history.append(
             PlateShotRecord(
@@ -275,8 +308,13 @@ class PlateRunState:
                 shot_number=shot_number,
                 shot_index=shot_index,
                 filepath=filepath,
+                is_repair=is_repair,
             )
         )
+        if is_repair and shot_number >= self.config.shots_per_well:
+            self.repair_queue.pop(0)
+            if not self.repair_queue:
+                self.repair_resume_well = None
         return self.progress_payload(last_saved=filepath)
 
     def discard_last(self, discarded_dir: str) -> tuple[PlateShotRecord | None, dict[str, Any]]:
@@ -290,7 +328,63 @@ class PlateRunState:
             os.makedirs(discarded_dir, exist_ok=True)
             record.filepath = shutil.move(record.filepath, _unique_path(discarded_dir, os.path.basename(record.filepath)))
 
+        if record.is_repair:
+            self.repair_queue = [well for well in self.repair_queue if well != record.well]
+            self.repair_queue.insert(0, record.well)
+
         return record, self.progress_payload(discarded=record.filepath)
+
+    def start_repair(
+        self,
+        wells: list[str],
+        discarded_dir: str,
+    ) -> tuple[list[PlateShotRecord], dict[str, Any]]:
+        if self.repair_queue:
+            raise RuntimeError("Finish the current repair pass before selecting more wells.")
+
+        selected_wells = [
+            well for well in self.config.ordered_wells
+            if well in {str(item).upper() for item in wells}
+        ]
+        if not selected_wells:
+            raise ValueError("Select at least one saved well to repair.")
+
+        invalid = [well for well in selected_wells if self.shots_by_well.get(well, 0) <= 0]
+        if invalid:
+            raise ValueError(f"Only wells with saved shots can be repaired: {', '.join(invalid)}")
+
+        removed_records: list[PlateShotRecord] = []
+        remaining_history: list[PlateShotRecord] = []
+        selected_lookup = set(selected_wells)
+
+        if any(os.path.exists(record.filepath) for record in self.history):
+            os.makedirs(discarded_dir, exist_ok=True)
+
+        for record in self.history:
+            if record.well not in selected_lookup:
+                remaining_history.append(record)
+                continue
+            if os.path.exists(record.filepath):
+                record.filepath = shutil.move(
+                    record.filepath,
+                    _unique_path(discarded_dir, os.path.basename(record.filepath)),
+                )
+            removed_records.append(record)
+
+        self.history = remaining_history
+        self.repair_resume_well = next(
+            (
+                well for well in self.config.ordered_wells
+                if well not in selected_lookup
+                and self.shots_by_well.get(well, 0) < self.config.shots_per_well
+            ),
+            None,
+        )
+        self.repair_queue = list(selected_wells)
+        for well in selected_wells:
+            self.shots_by_well[well] = 0
+
+        return removed_records, self.progress_payload(discarded=discarded_dir)
 
     def progress_payload(
         self,
@@ -304,6 +398,14 @@ class PlateRunState:
         )
         total_shots = total_wells * self.config.shots_per_well
         saved_shots = sum(self.shots_by_well.values())
+        repaired_wells = sorted(
+            {
+                record.well
+                for record in self.history
+                if record.is_repair and self.shots_by_well.get(record.well, 0) >= self.config.shots_per_well
+            },
+            key=self.config.ordered_wells.index,
+        )
 
         return {
             "plate_type": self.config.plate_type,
@@ -326,6 +428,10 @@ class PlateRunState:
             "last_saved": last_saved,
             "discarded": discarded,
             "can_discard": bool(self.history),
+            "repair_active": bool(self.repair_queue),
+            "repair_queue": list(self.repair_queue),
+            "repair_resume_well": self.repair_resume_well,
+            "repaired_wells": repaired_wells,
         }
 
     def to_mapping(self, plate_dir: str | None = None, **extra: Any) -> dict[str, Any]:
@@ -334,6 +440,8 @@ class PlateRunState:
             "shots_by_well": dict(self.shots_by_well),
             "history": [record.to_mapping(plate_dir=plate_dir) for record in self.history],
             "complete": self.is_complete,
+            "repair_queue": list(self.repair_queue),
+            "repair_resume_well": self.repair_resume_well,
         }
         data.update(extra)
         return data
