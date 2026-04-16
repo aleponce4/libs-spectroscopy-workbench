@@ -13,7 +13,6 @@ import numpy as np
 from adjust_spectrum import adjust_spectrum
 from adjust_plot import adjust_plot
 import numpy as np
-from calibration_curve import apply_calibration_curve
 import csv
 from import_dialog import open_import_dialog
 
@@ -36,6 +35,13 @@ def create_acquisition_buttons(app):
         btn.grid(row=i, column=0, padx=10, pady=15)
         btn.icon_photo = icon_photo
     return buttons_frame
+
+
+def apply_calibration_curve_lazy(app):
+    """Import the calibration workflow only when the user opens it."""
+    from calibration_curve import apply_calibration_curve
+
+    return apply_calibration_curve(app)
 
 # Function to create the sidebar
 def create_sidebar(app):
@@ -64,7 +70,7 @@ def create_sidebar(app):
         ("Export Plot", "Icons/export_icon.png", functools.partial(export_plot, app, app.ax)),
         ("Export Data", "Icons/savedata_icon.png", functools.partial(export_data, app)),
         ("Add to Training Library", "Icons/add_to_library_icon.png", functools.partial(add_to_training_library, app)),  
-        ("Apply Calibration Curve", "Icons/apply_library_icon.png", functools.partial(apply_calibration_curve, app)), 
+        ("Apply Calibration Curve", "Icons/apply_library_icon.png", functools.partial(apply_calibration_curve_lazy, app)), 
         ("Clean Plot", "Icons/clean_icon.png", functools.partial(clean_plot, app)),
     ]
 
@@ -460,7 +466,6 @@ def add_to_training_library(app):
   
     
    
-
 
 
 

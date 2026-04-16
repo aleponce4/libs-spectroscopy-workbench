@@ -518,11 +518,14 @@ def create_acquisition_sidebar(app):
     status_frame.columnconfigure(0, weight=1)
 
     app.worker_state_var = tk.StringVar(value="State: IDLE")
-    ttk.Label(
+    app.worker_state_label = tk.Label(
         status_frame,
         textvariable=app.worker_state_var,
-        style="StatusValue.TLabel",
-    ).grid(row=0, column=0, padx=6, sticky="w")
+        font=("Segoe UI", 9, "bold"),
+        fg="#B42318",
+        bg=app.root.cget("bg"),
+    )
+    app.worker_state_label.grid(row=0, column=0, padx=5, sticky="w")
 
     app.status_message_var = tk.StringVar(value="")
     ttk.Label(

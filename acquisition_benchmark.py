@@ -148,8 +148,11 @@ def wait_for_gui_timing_sample(app, expected_count: int, timeout_s: float) -> di
     while len(app.timing_samples) < expected_count:
         if time.perf_counter() > deadline:
             raise TimeoutError("Timed out waiting for a GUI timing sample.")
-        app.root.update_idletasks()
-        app.root.update()
+        app._poll_queue(reschedule=False)
+        try:
+            app.root.update_idletasks()
+        except Exception:
+            pass
         time.sleep(0.005)
     return dict(app.timing_samples[expected_count - 1])
 
@@ -453,8 +456,8 @@ def parse_args():
     parser.add_argument("--shots-per-well", type=int, default=1)
     parser.add_argument("--order-mode", choices=("row", "column"), default="row")
     parser.add_argument("--gui", action="store_true", help="Run through AcquisitionApp to measure GUI queue lag.")
-    parser.add_argument("--armed-poll-ms", type=float, default=100.0)
-    parser.add_argument("--live-poll-ms", type=float, default=50.0)
+    parser.add_argument("--armed-poll-ms", type=float, default=50.0)
+    parser.add_argument("--live-poll-ms", type=float, default=20.0)
     parser.add_argument("--averages", type=int, default=1)
     parser.add_argument("--timeout-sec", type=float, default=None)
     parser.add_argument("--output", type=str, default=None, help="Write a CSV or JSON report to this path.")
@@ -515,6 +518,7 @@ def main():
             app.auto_save_var.set(args.auto_save)
             app.plate_mode_var.set(bool(plate_config))
             app._finish_connection(status)
+            app._cancel_queue_poll()
             worker = app.worker
             if worker is None:
                 raise RuntimeError("Acquisition worker did not start.")
@@ -560,6 +564,15 @@ def main():
             print(f"\nWrote report: {args.output}")
 
     finally:
+        if app is not None:
+            try:
+                app._cleanup_and_close()
+            except Exception:
+                pass
+            app = None
+            worker = None
+            spectrometer = None
+            root = None
         if worker is not None:
             try:
                 worker.stop()
@@ -569,11 +582,6 @@ def main():
         if spectrometer is not None:
             try:
                 spectrometer.disconnect()
-            except Exception:
-                pass
-        if app is not None:
-            try:
-                app.on_disconnect()
             except Exception:
                 pass
         if root is not None:

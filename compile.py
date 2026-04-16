@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import tkinter
 import sys
@@ -8,6 +9,8 @@ from datetime import datetime
 main_script = os.path.abspath("main.py")
 base_output_dir = os.path.abspath("Compiled version")  # Output to local folder
 icon_path = os.path.abspath("Icons\\main_icon.ico")
+display_name = "LIBS Software"
+primary_zip_name = f"{display_name}.zip"
 
 # Locate Tcl/Tk library directories so PyInstaller bundles init.tcl
 _root = tkinter.Tk(); _root.withdraw()
@@ -96,13 +99,11 @@ hidden_imports = [
     # Additional problematic imports often missed
     "tkinter.ttk", "tkinter.filedialog", "tkinter.messagebox",
     "matplotlib.backends._backend_tk", "matplotlib.backends.backend_pdf",
-    "scipy.stats", "scipy.optimize", "scipy.interpolate",
-    "sklearn.ensemble", "sklearn.tree", "sklearn.linear_model",
+    "sklearn.linear_model",
     "numpy.random", "numpy.linalg", "numpy.fft",
-    "pandas.io.formats.style", "pandas.plotting",
     
     # Additional imports for robustness
-    "pkg_resources", "openpyxl", "xlsxwriter", "certifi", "urllib3",
+    "pkg_resources", "openpyxl", "certifi", "urllib3",
 
     # Acquisition mode modules
     "seabreeze", "seabreeze.spectrometers", "usb", "usb.core", "usb.backend",
@@ -114,128 +115,124 @@ hidden_imports = [
 
 libusb_dll_path = find_release_libusb_dll()
 
-# Build the command for PyInstaller
-command = [
-    python_path,
-    "-m",
-    "PyInstaller",
-    "--onefile",
-    "--windowed",  # Back to windowed mode for production
-    f"--icon={icon_path}",
-    f"--distpath={output_dir}",
-    "--clean",  # Clean cache and temporary files
-    "--noconfirm",  # Replace output directory without asking
-    
-    # Add data files - CSV files
-    f"--add-data={os.path.abspath('element_database.csv')};.",
-    f"--add-data={os.path.abspath('persistent_lines.csv')};.",
-    f"--add-data={os.path.abspath('calibration_data_library.csv')};.",
-    
-    # Add ALL icon files individually (this was the missing piece!)
-    f"--add-data={os.path.abspath('Icons/add_to_library_icon.png')};Icons",
-    f"--add-data={os.path.abspath('Icons/apply_library_icon.png')};Icons",
-    f"--add-data={os.path.abspath('Icons/clean_icon.png')};Icons",
-    f"--add-data={os.path.abspath('Icons/export_icon.png')};Icons",
-    f"--add-data={os.path.abspath('Icons/help_icon.png')};Icons",
-    f"--add-data={os.path.abspath('Icons/Import_icon.png')};Icons",
-    f"--add-data={os.path.abspath('Icons/main_icon.ico')};Icons",
-    f"--add-data={os.path.abspath('Icons/main_icon.png')};Icons",
-    f"--add-data={os.path.abspath('Icons/plot_icon.png')};Icons",
-    f"--add-data={os.path.abspath('Icons/presets_icon.png')};Icons",
-    f"--add-data={os.path.abspath('Icons/savedata_icon.png')};Icons",
-    f"--add-data={os.path.abspath('Icons/search_icon.png')};Icons",
-    f"--add-data={os.path.abspath('Icons/trigger_icon.png')};Icons",
-    f"--add-data={os.path.abspath('Icons/spectrum_icon.png')};Icons",
-    f"--add-data={os.path.abspath('Icons/Onteko_Logo.jpg')};Icons",
-    
-    # Add directories
-    f"--add-data={os.path.abspath('Help')};Help", 
-    f"--add-data={os.path.abspath('images')};images",
-    
-    # Add Tcl/Tk libraries so init.tcl is found at runtime
-    f"--add-data={tcl_library_path};lib/tcl8.6",
-    f"--add-data={tk_library_path};lib/tk8.6",
-    f"--add-binary={libusb_dll_path};.",
+def build_command(*, mode: str, distpath: str, name: str) -> list[str]:
+    """Build the PyInstaller command for the requested artifact mode."""
+    command = [
+        python_path,
+        "-m",
+        "PyInstaller",
+        f"--{mode}",
+        "--windowed",  # Back to windowed mode for production
+        f"--icon={icon_path}",
+        f"--distpath={distpath}",
+        "--clean",  # Clean cache and temporary files
+        "--noconfirm",  # Replace output directory without asking
 
-    # Set name to LIBS
-    "--name=LIBS",
-    main_script
-]
+        # Add data files - CSV files
+        f"--add-data={os.path.abspath('element_database.csv')};.",
+        f"--add-data={os.path.abspath('persistent_lines.csv')};.",
+        f"--add-data={os.path.abspath('calibration_data_library.csv')};.",
 
-# Add all hidden imports
-for hidden_import in hidden_imports:
-    command.extend(["--hidden-import", hidden_import])
+        # Add ALL icon files individually (this was the missing piece!)
+        f"--add-data={os.path.abspath('Icons/add_to_library_icon.png')};Icons",
+        f"--add-data={os.path.abspath('Icons/apply_library_icon.png')};Icons",
+        f"--add-data={os.path.abspath('Icons/clean_icon.png')};Icons",
+        f"--add-data={os.path.abspath('Icons/export_icon.png')};Icons",
+        f"--add-data={os.path.abspath('Icons/help_icon.png')};Icons",
+        f"--add-data={os.path.abspath('Icons/Import_icon.png')};Icons",
+        f"--add-data={os.path.abspath('Icons/main_icon.ico')};Icons",
+        f"--add-data={os.path.abspath('Icons/main_icon.png')};Icons",
+        f"--add-data={os.path.abspath('Icons/plot_icon.png')};Icons",
+        f"--add-data={os.path.abspath('Icons/presets_icon.png')};Icons",
+        f"--add-data={os.path.abspath('Icons/savedata_icon.png')};Icons",
+        f"--add-data={os.path.abspath('Icons/search_icon.png')};Icons",
+        f"--add-data={os.path.abspath('Icons/trigger_icon.png')};Icons",
+        f"--add-data={os.path.abspath('Icons/spectrum_icon.png')};Icons",
+        f"--add-data={os.path.abspath('Icons/Onteko_Logo.jpg')};Icons",
 
-# Add additional PyInstaller options for stability
-command.extend([
-    "--collect-all", "ttkthemes",  # Collect all ttkthemes data
-    "--collect-all", "sv_ttk",     # Collect all sv_ttk data
-    "--collect-all", "seabreeze",  # Collect all seabreeze data
-])
+        # Add directories
+        f"--add-data={os.path.abspath('Help')};Help",
+        f"--add-data={os.path.abspath('images')};images",
+
+        # Add Tcl/Tk libraries so init.tcl is found at runtime
+        f"--add-data={tcl_library_path};lib/tcl8.6",
+        f"--add-data={tk_library_path};lib/tk8.6",
+        f"--add-binary={libusb_dll_path};.",
+
+        # Set artifact name
+        f"--name={name}",
+        main_script,
+    ]
+
+    # Add all hidden imports
+    for hidden_import in hidden_imports:
+        command.extend(["--hidden-import", hidden_import])
+
+    # Add additional PyInstaller options for stability
+    command.extend([
+        "--collect-all", "ttkthemes",  # Collect all ttkthemes data
+        "--collect-all", "sv_ttk",     # Collect all sv_ttk data
+        "--collect-all", "seabreeze",  # Collect all seabreeze data
+    ])
+
+    if mode == "onedir":
+        # Keep the launchable app obvious while tucking support files into a subfolder.
+        command.extend(["--contents-directory", "_internal"])
+
+    return command
+
+
+def cleanup_old_builds():
+    """Keep only the 2 most recent build directories."""
+    compiled_dirs = []
+    for item in os.listdir(base_output_dir):
+        if item.startswith("compiled_") and os.path.isdir(os.path.join(base_output_dir, item)):
+            compiled_dirs.append(item)
+
+    compiled_dirs.sort(reverse=True)
+    if len(compiled_dirs) > 2:
+        for old_dir in compiled_dirs[2:]:
+            old_path = os.path.join(base_output_dir, old_dir)
+            print(f"Removing old build: {old_dir}")
+            shutil.rmtree(old_path)
+
+
+def zip_onedir_build():
+    zip_path = os.path.join(output_dir_onedir, primary_zip_name)
+    shutil.make_archive(zip_path.replace(".zip", ""), "zip", output_dir_onedir)
+    print(f"Zipped onedir build to {zip_path}")
+
+
+primary_command = build_command(mode="onedir", distpath=output_dir_onedir, name=display_name)
+fallback_command = build_command(mode="onefile", distpath=output_dir, name=display_name)
 
 # Print the command to be executed (for debugging)
-print("Running command:", " ".join(command))
+print("Running primary onedir command:", " ".join(primary_command))
 
 try:
-    # Run the command
-    subprocess.run(command, check=True)
-    print(f"Executable created in {output_dir}")
-    
-    # Auto-cleanup: Keep only the 2 most recent builds
+    # Build the primary onedir artifact first for faster startup distribution.
+    subprocess.run(primary_command, check=True)
+    print(f"One-folder build created in {output_dir_onedir}")
+
     try:
-        compiled_dirs = []
-        for item in os.listdir(base_output_dir):
-            if item.startswith("compiled_") and os.path.isdir(os.path.join(base_output_dir, item)):
-                compiled_dirs.append(item)
-        
-        # Sort by creation time (newest first)
-        compiled_dirs.sort(reverse=True)
-        
-        # Remove all but the 2 newest
-        if len(compiled_dirs) > 2:
-            for old_dir in compiled_dirs[2:]:
-                old_path = os.path.join(base_output_dir, old_dir)
-                print(f"Removing old build: {old_dir}")
-                import shutil
-                shutil.rmtree(old_path)
-                
+        zip_onedir_build()
+    except Exception as ze:
+        print(f"Warning: Could not create zip of onedir build: {ze}")
+
+    # Keep a onefile artifact as a fallback download.
+    try:
+        print("Running fallback onefile command:", " ".join(fallback_command))
+        subprocess.run(fallback_command, check=True)
+        print(f"Onefile build created in {output_dir}")
+    except subprocess.CalledProcessError as e:
+        print(f"Onefile build failed: {e}")
+    except Exception as e:
+        print(f"Unexpected error during onefile build: {e}")
+
+    try:
+        cleanup_old_builds()
     except Exception as cleanup_error:
         print(f"Warning: Could not clean old builds: {cleanup_error}")
-        
-    # After the onefile build, also create an onedir build for users
-    try:
-        onedir_cmd = list(command)
-        # replace --onefile with --onedir
-        for i, part in enumerate(onedir_cmd):
-            if part == "--onefile":
-                onedir_cmd[i] = "--onedir"
-        # change name and distpath for the onedir build
-        # replace --name=LIBS with --name=LIBS_dir if present
-        for i, part in enumerate(onedir_cmd):
-            if part.startswith("--name="):
-                onedir_cmd[i] = "--name=LIBS_dir"
-        # replace distpath to the onedir output folder
-        for i, part in enumerate(onedir_cmd):
-            if part.startswith("--distpath="):
-                onedir_cmd[i] = f"--distpath={output_dir_onedir}"
-
-        print("Running onedir build:", " ".join(onedir_cmd))
-        subprocess.run(onedir_cmd, check=True)
-        print(f"One-folder build created in {output_dir_onedir}")
-
-        # Zip the onedir output for easy release upload
-        try:
-            import shutil
-            zip_path = os.path.join(output_dir_onedir, "LIBS_dir.zip")
-            shutil.make_archive(zip_path.replace('.zip',''), 'zip', output_dir_onedir)
-            print(f"Zipped onedir build to {zip_path}")
-        except Exception as ze:
-            print(f"Warning: Could not create zip of onedir build: {ze}")
-
-    except subprocess.CalledProcessError as e:
-        print(f"Onedir build failed: {e}")
-    except Exception as e:
-        print(f"Unexpected error during onedir build: {e}")
 
 except subprocess.CalledProcessError as e:
     print(f"An error occurred: {e}")

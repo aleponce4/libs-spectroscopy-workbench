@@ -29,6 +29,7 @@ ORDER_LABELS = {
     ORDER_COLUMN: "Column by column",
 }
 PLATE_STATE_FILENAME = "_plate_state.json"
+PLATE_METADATA_FILENAME = "plate_metadata.txt"
 PLATE_FILE_PATTERN = re.compile(
     r"^(?P<safe_plate_name>.+)_(?P<well>[A-Z]\d+)_shot(?P<shot_number>\d+)_"
     r"(?P<timestamp>\d{8}_\d{6})_(?P<shot_index>\d+)\.csv$"
@@ -58,6 +59,16 @@ def _optional_float(value: Any) -> float | None:
         return None
 
 
+def _optional_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"", "0", "false", "no", "off", "none"}:
+            return False
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+    return bool(value)
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -82,6 +93,15 @@ class PlateAutosaveConfig:
     order_mode: str = ORDER_ROW
     laser_wavelength_nm: float | None = None
     laser_energy_mj: float | None = None
+    laser_energy: str = ""
+    laser_hz: str = ""
+    delay_enabled: bool = False
+    delay_ms: str = ""
+    sample_name: str = "Sample"
+    integration_time_ms: str = ""
+    averages: int = 1
+    correct_dark_counts: bool = False
+    correct_nonlinearity: bool = False
 
     @classmethod
     def from_mapping(cls, values: dict[str, Any]) -> "PlateAutosaveConfig":
@@ -97,6 +117,11 @@ class PlateAutosaveConfig:
         plate_name = str(values.get("plate_name", "Plate")).strip() or "Plate"
         laser_wavelength_nm = _optional_float(values.get("laser_wavelength_nm"))
         laser_energy_mj = _optional_float(values.get("laser_energy_mj"))
+        laser_energy = str(values.get("laser_energy", "")).strip()
+        if not laser_energy and laser_energy_mj is not None:
+            laser_energy = str(laser_energy_mj)
+        if laser_energy_mj is None:
+            laser_energy_mj = _optional_float(values.get("laser_energy"))
         return cls(
             plate_type=plate_type,
             plate_name=plate_name,
@@ -104,6 +129,15 @@ class PlateAutosaveConfig:
             order_mode=order_mode,
             laser_wavelength_nm=laser_wavelength_nm,
             laser_energy_mj=laser_energy_mj,
+            laser_energy=laser_energy,
+            laser_hz=str(values.get("laser_hz", "")).strip(),
+            delay_enabled=_optional_bool(values.get("delay_enabled", False)),
+            delay_ms=str(values.get("delay_ms", "")).strip(),
+            sample_name=str(values.get("sample_name", "Sample")).strip() or "Sample",
+            integration_time_ms=str(values.get("integration_time_ms", "")).strip(),
+            averages=max(1, int(values.get("averages", 1))),
+            correct_dark_counts=_optional_bool(values.get("correct_dark_counts", False)),
+            correct_nonlinearity=_optional_bool(values.get("correct_nonlinearity", False)),
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -114,6 +148,15 @@ class PlateAutosaveConfig:
             "order_mode": self.order_mode,
             "laser_wavelength_nm": self.laser_wavelength_nm,
             "laser_energy_mj": self.laser_energy_mj,
+            "laser_energy": self.laser_energy,
+            "laser_hz": self.laser_hz,
+            "delay_enabled": self.delay_enabled,
+            "delay_ms": self.delay_ms,
+            "sample_name": self.sample_name,
+            "integration_time_ms": self.integration_time_ms,
+            "averages": self.averages,
+            "correct_dark_counts": self.correct_dark_counts,
+            "correct_nonlinearity": self.correct_nonlinearity,
         }
 
     @property
@@ -418,6 +461,15 @@ class PlateRunState:
             "shots_per_well": self.config.shots_per_well,
             "laser_wavelength_nm": self.config.laser_wavelength_nm,
             "laser_energy_mj": self.config.laser_energy_mj,
+            "laser_energy": self.config.laser_energy,
+            "laser_hz": self.config.laser_hz,
+            "delay_enabled": self.config.delay_enabled,
+            "delay_ms": self.config.delay_ms,
+            "sample_name": self.config.sample_name,
+            "integration_time_ms": self.config.integration_time_ms,
+            "averages": self.config.averages,
+            "correct_dark_counts": self.config.correct_dark_counts,
+            "correct_nonlinearity": self.config.correct_nonlinearity,
             "shots_by_well": dict(self.shots_by_well),
             "current_well": self.current_well(),
             "complete": self.is_complete,
@@ -477,6 +529,43 @@ def save_plate_run_state(
         json.dump(payload, handle, indent=2, sort_keys=True)
     if timing is not None:
         timing["plate_state_write_end"] = time.perf_counter()
+
+    save_plate_metadata_file(plate_dir, state.config)
+    return filepath
+
+
+def plate_metadata_path(plate_dir: str) -> str:
+    return os.path.join(plate_dir, PLATE_METADATA_FILENAME)
+
+
+def save_plate_metadata_file(plate_dir: str, config: PlateAutosaveConfig) -> str:
+    os.makedirs(plate_dir, exist_ok=True)
+    filepath = plate_metadata_path(plate_dir)
+
+    lines = [
+        f"Plate name: {config.plate_name}",
+        f"Plate type: {config.plate_type}-well",
+        f"Shots per well: {config.shots_per_well}",
+        f"Order: {ORDER_LABELS[config.order_mode]}",
+        "",
+        "Laser metadata",
+        f"Laser wavelength (nm): {config.laser_wavelength_nm if config.laser_wavelength_nm is not None else 'Not provided'}",
+        f"Laser energy (mJ): {config.laser_energy_mj if config.laser_energy_mj is not None else 'Not provided'}",
+        f"Laser energy: {config.laser_energy or 'Not provided'}",
+        f"Laser frequency (Hz): {config.laser_hz or 'Not provided'}",
+        f"Delay enabled: {'Yes' if config.delay_enabled else 'No'}",
+        f"Delay (ms): {config.delay_ms or 'Not provided'}",
+        "",
+        "Spectrometer settings",
+        f"Sample name: {config.sample_name}",
+        f"Integration time (ms): {config.integration_time_ms or 'Unknown'}",
+        f"Averages: {config.averages}",
+        f"Dark count correction: {'On' if config.correct_dark_counts else 'Off'}",
+        f"Nonlinearity correction: {'On' if config.correct_nonlinearity else 'Off'}",
+    ]
+
+    with open(filepath, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
 
     return filepath
 

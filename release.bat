@@ -1,4 +1,5 @@
 @echo off
+set app_name=LIBS Software
 echo ================================
 echo    LIBS Data Analysis Release    
 echo ================================
@@ -52,37 +53,48 @@ if %errorlevel% neq 0 (
 )
 
 echo.
-echo Finding compiled executable...
+echo Finding compiled release artifacts...
 echo ================================
 
-:: Find the most recent compiled folder using Windows commands
-set newest_folder=
+:: Find the most recent onedir build folder using Windows commands
+set newest_dir=
 for /f "delims=" %%i in ('dir "Compiled version\compiled_*" /b /ad /o-d 2^>nul') do (
-    if not defined newest_folder (
+    if not defined newest_dir (
         echo %%i| findstr /r /c:"_dir$" >nul
-        if errorlevel 1 set newest_folder=%%i
+        if not errorlevel 1 set newest_dir=%%i
     )
 )
 
-if "%newest_folder%"=="" (
-    echo Error: No compiled folder found
+if "%newest_dir%"=="" (
+    echo Error: No onedir build folder found
     echo Available folders:
     dir "Compiled version" /b
     pause
     exit /b 1
 )
 
-set exe_path="Compiled version\%newest_folder%\LIBS.exe"
+set zip_path="Compiled version\%newest_dir%\%app_name%.zip"
 
-if not exist %exe_path% (
-    echo Error: Executable not found at %exe_path%
-    echo Contents of %newest_folder%:
-    dir "Compiled version\%newest_folder%" /b
+if not exist %zip_path% (
+    echo Error: Primary onedir zip not found at %zip_path%
+    echo Contents of %newest_dir%:
+    dir "Compiled version\%newest_dir%" /b
     pause
     exit /b 1
 )
 
-echo Found executable: %exe_path%
+set newest_onefile=%newest_dir:_dir=%
+set exe_path="Compiled version\%newest_onefile%\%app_name%.exe"
+set release_assets=%zip_path%
+
+if exist %exe_path% (
+    set release_assets=%release_assets% %exe_path%
+    echo Found primary artifact: %zip_path%
+    echo Found fallback artifact: %exe_path%
+) else (
+    echo Found primary artifact: %zip_path%
+    echo Warning: Fallback onefile executable not found at %exe_path%
+)
 
 echo.
 echo Creating GitHub release...
@@ -97,9 +109,11 @@ set release_notes=- Model-agnostic spectrometer support (any Ocean Optics model)
 
 - UI adapts dynamically to connected device capabilities^
 
-- Architecture prepared for future multi-brand support
+- Architecture prepared for future multi-brand support^
 
-gh release create %version% --title "LIBS Data Analysis %version%" --notes "%release_notes%" %exe_path%
+- Recommended download: zipped one-folder build for faster startup
+
+gh release create %version% --title "LIBS Data Analysis %version%" --notes "%release_notes%" %release_assets%
 
 if %errorlevel% neq 0 (
     echo Error: GitHub release creation failed

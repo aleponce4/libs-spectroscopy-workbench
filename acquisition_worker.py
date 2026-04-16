@@ -87,9 +87,9 @@ class AcquisitionWorker(threading.Thread):
         self._plate_run_state = None
         self.collect_timing_metrics = False
 
-        # Live view rate limiting
-        self.live_poll_interval = 0.05  # 50 ms between live polls
-        self.armed_poll_interval = 0.1   # 100 ms between trigger future checks
+        # Faster active polling keeps live view and trigger-state feedback snappy.
+        self.live_poll_interval = 0.02   # 20 ms between live polls
+        self.armed_poll_interval = 0.05  # 50 ms between trigger future checks
 
         # Averaging
         self.averages = 1  # Number of spectra to average in LIVE mode
@@ -176,6 +176,13 @@ class AcquisitionWorker(threading.Thread):
         """Signal the worker thread to terminate."""
         self._stop_event.set()
         self._state_change_event.set()  # Wake up if sleeping
+
+    def _wait_for_interruptible_interval(self, interval_s: float):
+        """Wait for a short interval while still responding to state changes."""
+        if interval_s <= 0:
+            return
+        self._state_change_event.wait(timeout=interval_s)
+        self._state_change_event.clear()
 
     def reset_shot_index(self):
         """Reset the shot counter (e.g., when sample name changes)."""
@@ -371,8 +378,8 @@ class AcquisitionWorker(threading.Thread):
                     self.go_idle()
                     return
 
-            # Rate limit
-            time.sleep(self.live_poll_interval)
+            # Rate limit while remaining responsive to stop/disarm actions.
+            self._wait_for_interruptible_interval(self.live_poll_interval)
             if timing is not None:
                 timing["cycle_end"] = time.perf_counter()
                 timing["message_sent"] = timing["cycle_end"]
@@ -420,7 +427,7 @@ class AcquisitionWorker(threading.Thread):
                         self._send(AcquisitionMessage.STATUS, "Trigger cancelled.")
                         executor.shutdown(wait=False)
                         return  # go_idle() already flipped trigger mode
-                    time.sleep(self.armed_poll_interval)
+                    self._wait_for_interruptible_interval(self.armed_poll_interval)
 
                 # Capture completed
                 if timing is not None:

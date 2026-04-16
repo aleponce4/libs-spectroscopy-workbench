@@ -107,6 +107,12 @@ class AcquisitionApp:
         self._queue_poll_after_id = None
         self.timing_samples = []
         self.latest_timing_sample = None
+        self._pending_spectrum = None
+        self._pending_draw_after_id = None
+        self._last_plot_draw_at = 0.0
+        self.active_queue_poll_ms = 15
+        self.idle_queue_poll_ms = 75
+        self.live_redraw_interval_ms = 33
         # ─── Build UI ──────────────────────────────────────────────────
         # Graph area (offset from sidebar, same as analysis mode)
         self.graph_container = tk.Frame(self.root)
@@ -394,7 +400,7 @@ class AcquisitionApp:
             self.spectrometer = None
 
         self.connection_status_var.set("Disconnected")
-        self.worker_state_var.set("State: IDLE")
+        self._set_worker_state("State: IDLE")
         self.status_message_var.set("Disconnected.")
 
         # Reset buttons
@@ -442,7 +448,7 @@ class AcquisitionApp:
             self._set_arm_button_visual("disabled")
             self.test_trigger_btn.config(state="disabled")
             self.stop_btn.config(state="normal")
-            self.worker_state_var.set("State: LIVE")
+            self._set_worker_state("State: LIVE")
 
     def on_arm_trigger(self):
         """Arm the hardware trigger and wait for laser pulse.
@@ -462,7 +468,7 @@ class AcquisitionApp:
             self._set_arm_button_visual("armed")
             self.test_trigger_btn.config(state="disabled")
             self.stop_btn.config(state="normal")
-            self.worker_state_var.set("State: ARMED")
+            self._set_worker_state("State: ARMED")
 
     def on_test_trigger(self):
         """Fire a test capture using normal mode to verify the full pipeline."""
@@ -478,7 +484,7 @@ class AcquisitionApp:
             self._set_arm_button_visual("disabled")
             self.test_trigger_btn.config(state="disabled")
             self.stop_btn.config(state="normal")
-            self.worker_state_var.set("State: TEST")
+            self._set_worker_state("State: TEST")
 
     def on_stop(self):
         """Stop acquisition (live view or disarm trigger / loop)."""
@@ -489,7 +495,7 @@ class AcquisitionApp:
             self._update_arm_btn_state()
             self.test_trigger_btn.config(state="normal")
             self.stop_btn.config(state="disabled")
-            self.worker_state_var.set("State: IDLE")
+            self._set_worker_state("State: IDLE")
 
     def on_apply_integration(self):
         """Apply the integration time setting."""
@@ -933,6 +939,70 @@ class AcquisitionApp:
             if hasattr(self, "arm_status_chip"):
                 self.arm_status_chip.config(bg="#E4E8ED", fg="#4D5A67")
 
+    def _set_worker_state(self, state_text):
+        """Update the worker state text and color-code armed vs not armed."""
+        self.worker_state_var.set(state_text)
+        if hasattr(self, "worker_state_label"):
+            is_armed = "ARMED" in str(state_text).upper()
+            self.worker_state_label.config(fg="#1A7F37" if is_armed else "#B42318")
+
+    def _schedule_spectrum_draw(self):
+        """Coalesce rapid spectrum updates into a capped redraw cadence."""
+        if self._pending_spectrum is None or self._pending_draw_after_id is not None:
+            return
+
+        elapsed_ms = (time.perf_counter() - self._last_plot_draw_at) * 1000.0
+        delay_ms = 0 if elapsed_ms >= self.live_redraw_interval_ms else int(self.live_redraw_interval_ms - elapsed_ms)
+        self._pending_draw_after_id = self.root.after(delay_ms, self._flush_pending_spectrum)
+
+    def _flush_pending_spectrum(self):
+        """Draw the latest queued live spectrum."""
+        self._pending_draw_after_id = None
+        if self._pending_spectrum is None:
+            return
+
+        wavelengths, intensities = self._pending_spectrum
+        self._pending_spectrum = None
+
+        from acquisition_graph import update_spectrum_fast
+
+        update_spectrum_fast(self.ax, self.canvas, self.live_line, wavelengths, intensities)
+        self._last_plot_draw_at = time.perf_counter()
+
+    def _cancel_pending_spectrum_draw(self, *, drop_pending: bool = False):
+        """Cancel any scheduled coalesced redraw callback."""
+        if self._pending_draw_after_id is not None:
+            try:
+                self.root.after_cancel(self._pending_draw_after_id)
+            except tk.TclError:
+                pass
+            self._pending_draw_after_id = None
+        if drop_pending:
+            self._pending_spectrum = None
+
+    def _cancel_canvas_idle_draw(self):
+        """Cancel any Matplotlib Tk idle-draw callback before tearing down the UI."""
+        if not hasattr(self, "canvas"):
+            return
+        idle_draw_id = getattr(self.canvas, "_idle_draw_id", None)
+        if not idle_draw_id:
+            return
+        try:
+            self.canvas._tkcanvas.after_cancel(idle_draw_id)
+        except (AttributeError, tk.TclError):
+            pass
+        self.canvas._idle_draw_id = None
+
+    def _queue_poll_delay_ms(self, processed_messages: int):
+        """Poll faster while acquisition is active and slower when idle."""
+        if self.worker is None:
+            return self.idle_queue_poll_ms
+        if processed_messages > 0 or self._pending_spectrum is not None:
+            return self.active_queue_poll_ms
+        if self.worker.state in {"LIVE", "ARMED", "TEST"}:
+            return self.active_queue_poll_ms
+        return self.idle_queue_poll_ms
+
     # ═══════════════════════════════════════════════════════════════════
     #  Message Queue Polling (thread-safe GUI updates)
     # ═══════════════════════════════════════════════════════════════════
@@ -945,6 +1015,23 @@ class AcquisitionApp:
 
     def _plate_requires_reconfigure(self):
         return bool(self.plate_mode_var.get() and self._plate_payload_finished(self.plate_progress))
+
+    def _current_plate_runtime_settings(self):
+        """Snapshot the acquisition settings that should be written into plate metadata."""
+        averages = 1
+        if hasattr(self, "averages_var"):
+            try:
+                averages = max(1, int(self.averages_var.get()))
+            except (TypeError, ValueError):
+                averages = 1
+
+        return {
+            "sample_name": self.sample_name_var.get().strip() or "Sample",
+            "integration_time_ms": self.integration_var.get().strip() if hasattr(self, "integration_var") else "",
+            "averages": averages,
+            "correct_dark_counts": bool(self.correct_dark_var.get()) if hasattr(self, "correct_dark_var") else False,
+            "correct_nonlinearity": bool(self.correct_nl_var.get()) if hasattr(self, "correct_nl_var") else False,
+        }
 
     def _apply_plate_config(self, config):
         if not isinstance(config, PlateAutosaveConfig):
@@ -1133,8 +1220,8 @@ class AcquisitionApp:
         ph = self.root.winfo_height()
         px = self.root.winfo_x()
         py = self.root.winfo_y()
-        desired_w, desired_h = 760, 600
-        min_w, min_h = 680, 520
+        desired_w, desired_h = 760, 640
+        min_w, min_h = 700, 580
         dw = max(min_w, min(desired_w, screen_w - 80))
         dh = max(min_h, min(desired_h, screen_h - 120))
         dx = px + max((pw - dw) // 2, 0)
@@ -1166,9 +1253,13 @@ class AcquisitionApp:
         laser_wavelength_var = tk.StringVar(
             value="" if current.laser_wavelength_nm is None else str(current.laser_wavelength_nm)
         )
-        laser_energy_var = tk.StringVar(
-            value="" if current.laser_energy_mj is None else str(current.laser_energy_mj)
-        )
+        laser_energy_default = current.laser_energy
+        if not laser_energy_default and current.laser_energy_mj is not None:
+            laser_energy_default = str(current.laser_energy_mj)
+        laser_energy_var = tk.StringVar(value=laser_energy_default)
+        laser_hz_var = tk.StringVar(value=current.laser_hz)
+        delay_enabled_var = tk.BooleanVar(value=current.delay_enabled)
+        delay_ms_var = tk.StringVar(value=current.delay_ms)
 
         ttk.Label(form, text="Plate type:").grid(row=0, column=0, sticky="w", pady=4)
         plate_combo = ttk.Combobox(
@@ -1194,18 +1285,60 @@ class AcquisitionApp:
             row=4, column=1, sticky="w", pady=(1, 4)
         )
 
-        ttk.Label(form, text="Laser wavelength (nm):").grid(row=5, column=0, sticky="w", pady=4)
-        ttk.Entry(form, textvariable=laser_wavelength_var, width=14).grid(row=5, column=1, sticky="w", pady=4)
-
-        ttk.Label(form, text="Laser energy (mJ):").grid(row=6, column=0, sticky="w", pady=4)
-        ttk.Entry(form, textvariable=laser_energy_var, width=14).grid(row=6, column=1, sticky="w", pady=4)
-
         ttk.Label(
             form,
             text=helper_text,
             style="Status.TLabel",
             wraplength=210,
-        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(12, 0))
+
+        metadata_frame = ttk.LabelFrame(form, text="Laser Metadata", padding=8)
+        metadata_frame.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        metadata_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(metadata_frame, text="Laser wavelength (nm):", style="Status.TLabel").grid(
+            row=0, column=0, sticky="w", pady=3
+        )
+        ttk.Entry(metadata_frame, textvariable=laser_wavelength_var, width=16).grid(
+            row=0, column=1, sticky="ew", pady=3
+        )
+
+        ttk.Label(metadata_frame, text="Laser energy:", style="Status.TLabel").grid(
+            row=1, column=0, sticky="w", pady=3
+        )
+        ttk.Entry(metadata_frame, textvariable=laser_energy_var, width=16).grid(
+            row=1, column=1, sticky="ew", pady=3
+        )
+
+        ttk.Label(metadata_frame, text="Laser frequency (Hz):", style="Status.TLabel").grid(
+            row=2, column=0, sticky="w", pady=3
+        )
+        ttk.Entry(metadata_frame, textvariable=laser_hz_var, width=16).grid(
+            row=2, column=1, sticky="ew", pady=3
+        )
+
+        ttk.Checkbutton(
+            metadata_frame,
+            text="Delay enabled",
+            variable=delay_enabled_var,
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 3))
+
+        ttk.Label(metadata_frame, text="Delay (ms):", style="Status.TLabel").grid(
+            row=4, column=0, sticky="w", pady=3
+        )
+        delay_ms_entry = ttk.Entry(metadata_frame, textvariable=delay_ms_var, width=16)
+        delay_ms_entry.grid(row=4, column=1, sticky="ew", pady=3)
+
+        runtime_settings_var = tk.StringVar()
+        runtime_frame = ttk.LabelFrame(form, text="Spectrometer Settings Saved Automatically", padding=8)
+        runtime_frame.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        ttk.Label(
+            runtime_frame,
+            textvariable=runtime_settings_var,
+            style="Status.TLabel",
+            wraplength=210,
+            justify=tk.LEFT,
+        ).grid(row=0, column=0, sticky="w")
 
         preview_frame = ttk.LabelFrame(main, text="Plate Preview", padding=10)
         preview_frame.grid(row=1, column=1, sticky="nsew")
@@ -1225,6 +1358,7 @@ class AcquisitionApp:
         button_bar.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(14, 0))
 
         def _current_dialog_config():
+            runtime = self._current_plate_runtime_settings()
             return PlateAutosaveConfig.from_mapping({
                 "plate_type": plate_type_var.get(),
                 "plate_name": plate_name_var.get(),
@@ -1232,6 +1366,11 @@ class AcquisitionApp:
                 "order_mode": order_var.get(),
                 "laser_wavelength_nm": laser_wavelength_var.get(),
                 "laser_energy_mj": laser_energy_var.get(),
+                "laser_energy": laser_energy_var.get(),
+                "laser_hz": laser_hz_var.get(),
+                "delay_enabled": delay_enabled_var.get(),
+                "delay_ms": delay_ms_var.get(),
+                **runtime,
             })
 
         def _redraw_preview(*_):
@@ -1247,6 +1386,19 @@ class AcquisitionApp:
                     fill="#A33",
                     font=("Segoe UI", 10, "bold"),
                 )
+
+            runtime = self._current_plate_runtime_settings()
+            runtime_settings_var.set(
+                "\n".join([
+                    f"Sample name: {runtime['sample_name']}",
+                    f"Integration time: {runtime['integration_time_ms'] or 'Unknown'} ms",
+                    f"Averages: {runtime['averages']}",
+                    f"Dark correction: {'On' if runtime['correct_dark_counts'] else 'Off'}",
+                    f"Nonlinearity correction: {'On' if runtime['correct_nonlinearity'] else 'Off'}",
+                ])
+            )
+
+            delay_ms_entry.config(state="normal" if delay_enabled_var.get() else "disabled")
 
         def _apply():
             try:
@@ -1264,8 +1416,18 @@ class AcquisitionApp:
             result["selection"] = selection
             dlg.destroy()
 
-        for var in (plate_type_var, plate_name_var, shots_var, order_var, laser_wavelength_var, laser_energy_var):
+        for var in (
+            plate_type_var,
+            plate_name_var,
+            shots_var,
+            order_var,
+            laser_wavelength_var,
+            laser_energy_var,
+            laser_hz_var,
+            delay_ms_var,
+        ):
             var.trace_add("write", _redraw_preview)
+        delay_enabled_var.trace_add("write", _redraw_preview)
 
         ttk.Button(button_bar, text="Cancel", width=12, command=dlg.destroy).pack(side=tk.RIGHT, padx=(6, 0))
         ttk.Button(button_bar, text=action_text, width=18, command=_apply).pack(side=tk.RIGHT)
@@ -1611,24 +1773,26 @@ class AcquisitionApp:
         canvas.create_image(0, 0, image=photo, anchor=tk.NW)
         canvas._plate_image = photo
 
-    def _poll_queue(self):
+    def _poll_queue(self, reschedule: bool = True):
         """Check the worker's message queue and process all pending messages."""
         if self.worker is None:
             return
 
         from acquisition_worker import AcquisitionMessage
-        from acquisition_graph import update_spectrum_fast, highlight_captured_spectrum
+        from acquisition_graph import highlight_captured_spectrum
+        processed_messages = 0
 
         try:
             while True:
                 msg_type, data = self.worker.message_queue.get_nowait()
+                processed_messages += 1
 
                 if msg_type == AcquisitionMessage.SPECTRUM:
                     wavelengths, intensities = data
                     self.current_wavelengths = wavelengths
                     self.current_intensities = intensities
-                    update_spectrum_fast(self.ax, self.canvas, self.live_line,
-                                         wavelengths, intensities)
+                    self._pending_spectrum = (wavelengths, intensities)
+                    self._schedule_spectrum_draw()
                     # Enable save/send buttons now that we have data
                     self.save_spectrum_btn.config(state="normal")
                     self.send_to_analysis_btn.config(state="normal")
@@ -1642,10 +1806,13 @@ class AcquisitionApp:
 
                 elif msg_type == AcquisitionMessage.ARMED:
                     self._set_arm_button_visual("armed")
-                    self.worker_state_var.set("State: ARMED")
+                    self._set_worker_state("State: ARMED")
 
                 elif msg_type == AcquisitionMessage.CAPTURED:
+                    self._cancel_pending_spectrum_draw(drop_pending=True)
                     shot_idx = data["shot_index"]
+                    self.current_wavelengths = data["wavelengths"]
+                    self.current_intensities = data["intensities"]
                     self.shot_count_var.set(f"Shots: {shot_idx}")
                     # Visual feedback
                     self._cancel_highlight_timer()
@@ -1653,6 +1820,7 @@ class AcquisitionApp:
                         self.ax, self.canvas, self.live_line, data["wavelengths"],
                         data["intensities"], shot_idx
                     )
+                    self._last_plot_draw_at = time.perf_counter()
                     # Remove highlight after 2 seconds
                     self._highlight_after_id = self.root.after(2000, self._remove_highlight)
 
@@ -1660,14 +1828,14 @@ class AcquisitionApp:
                     # While it stays in ARMED state, keep Stop enabled.
                     if self.worker and self.worker.state == "ARMED":
                         self._set_arm_button_visual("armed")
-                        self.worker_state_var.set(f"State: ARMED (shot {shot_idx})")
+                        self._set_worker_state(f"State: ARMED (shot {shot_idx})")
                     else:
                         # Worker returned to idle (error or single-shot test)
                         self.live_btn.config(state="normal")
                         self._update_arm_btn_state()
                         self.test_trigger_btn.config(state="normal")
                         self.stop_btn.config(state="disabled")
-                        self.worker_state_var.set("State: IDLE")
+                        self._set_worker_state("State: IDLE")
 
                 elif msg_type == AcquisitionMessage.IDLE:
                     self._remove_highlight()
@@ -1676,7 +1844,7 @@ class AcquisitionApp:
                     self._update_arm_btn_state()
                     self.test_trigger_btn.config(state="normal")
                     self.stop_btn.config(state="disabled")
-                    self.worker_state_var.set("State: IDLE")
+                    self._set_worker_state("State: IDLE")
                     if self._plate_completion_prompt_pending:
                         self._plate_completion_prompt_pending = False
                         self.root.after(0, self._prompt_for_next_plate)
@@ -1722,24 +1890,29 @@ class AcquisitionApp:
                 elif msg_type == AcquisitionMessage.STOPPED:
                     self._remove_highlight()
                     self._set_arm_button_visual("disabled")
-                    self.worker_state_var.set("State: STOPPED")
+                    self._set_worker_state("State: STOPPED")
 
         except queue.Empty:
             pass
 
-        # Schedule next poll (50 ms)
-        if self.worker:
-            self._queue_poll_after_id = self.root.after(50, self._poll_queue)
+        # Schedule next poll with a faster cadence while acquisition is active.
+        if reschedule and self.worker:
+            self._queue_poll_after_id = self.root.after(
+                self._queue_poll_delay_ms(processed_messages),
+                self._poll_queue,
+            )
 
     def _cancel_queue_poll(self):
         """Cancel any pending queue polling callback."""
         if self._queue_poll_after_id is None:
+            self._cancel_pending_spectrum_draw(drop_pending=True)
             return
         try:
             self.root.after_cancel(self._queue_poll_after_id)
         except tk.TclError:
             pass
         self._queue_poll_after_id = None
+        self._cancel_pending_spectrum_draw(drop_pending=True)
 
     def _cancel_highlight_timer(self):
         """Cancel any pending highlight clear callback."""
@@ -1824,6 +1997,7 @@ class AcquisitionApp:
         """Stop the worker, disconnect the spectrometer, and exit mainloop.
         Uses quit() so the shared root stays alive for Analysis mode handoff."""
         self._cancel_queue_poll()
+        self._cancel_canvas_idle_draw()
         self._remove_highlight()
         if self.worker:
             self.worker.stop()
@@ -1833,6 +2007,12 @@ class AcquisitionApp:
         if self.spectrometer:
             self.spectrometer.disconnect()
             self.spectrometer = None
+
+        try:
+            self.root.update_idletasks()
+            self.root.update()
+        except tk.TclError:
+            pass
 
         # Remove all acquisition widgets so the root can be reused
         for widget in self.root.winfo_children():
@@ -1844,6 +2024,7 @@ class AcquisitionApp:
         """Stop the worker, disconnect the spectrometer, and exit.
         Used when the user closes the window without handoff."""
         self._cancel_queue_poll()
+        self._cancel_canvas_idle_draw()
         self._remove_highlight()
         if self.worker:
             self.worker.stop()
@@ -1853,6 +2034,12 @@ class AcquisitionApp:
         if self.spectrometer:
             self.spectrometer.disconnect()
             self.spectrometer = None
+
+        try:
+            self.root.update_idletasks()
+            self.root.update()
+        except tk.TclError:
+            pass
 
         self.root.destroy()
 
